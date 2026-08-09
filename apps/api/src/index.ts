@@ -26,18 +26,23 @@ import {
   ResponseWithSentry,
 } from "./controllers/v1/types";
 import { ZodError } from "zod";
-import { QueueFullError } from "./lib/concurrency-limit";
+import { QueueFullError } from "./lib/queue-full-error";
 import { v7 as uuidv7 } from "uuid";
-import { attachWsProxy } from "./services/agentLivecastWS";
 import { cacheableLookup } from "./scraper/scrapeURL/lib/cacheableLookup";
 import { v2Router } from "./routes/v2";
+import { labsRouter } from "./routes/labs";
+import { registerMcpActionLogIngestRoute } from "./routes/mcp-action-logs";
+import { startMcpActionLogRetentionWorkerIfEnabled } from "./services/mcp/action-logs";
+import { db } from "./db/connection";
 import { nuqShutdown } from "./services/worker/nuq";
 import { getErrorContactMessage } from "./lib/deployment";
 import { initializeBlocklist } from "./scraper/WebScraper/utils/blocklist";
+import { warmExchangeCatalog } from "./lib/exchange";
 import { initializeEngineForcing } from "./scraper/WebScraper/utils/engine-forcing";
 import responseTime from "response-time";
 import { shutdownWebhookQueue } from "./services/webhook";
 import { shutdownIndexerQueue } from "./services/indexing/indexer-queue";
+import { isKeylessConfigured } from "./lib/keyless";
 
 const { createBullBoard } = require("@bull-board/api");
 const { BullMQAdapter } = require("@bull-board/api/bullMQAdapter");
@@ -49,6 +54,12 @@ logger.info(`Number of CPUs: ${numCPUs} available`);
 logger.info("Network info dump", {
   networkInterfaces: os.networkInterfaces(),
 });
+
+if (isKeylessConfigured() && !config.KEYLESS_CONVERSION_HMAC_SECRET) {
+  logger.warn(
+    "Keyless conversion cohort logging is disabled: set KEYLESS_CONVERSION_HMAC_SECRET to enable privacy-safe quota-to-account measurement",
+  );
+}
 
 // Install cacheable lookup for all other requests
 cacheableLookup.install(http.globalAgent);
@@ -63,8 +74,23 @@ global.isProduction = config.IS_PRODUCTION;
 
 setSentryServiceTag("api");
 
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json({ limit: "10mb" }));
+// Capture the exact request bytes so integrations that sign the raw payload
+// (e.g. Slack's X-Slack-Signature) can verify it after body parsing. Typed with
+// the node http types body-parser's `verify` hook expects.
+const captureRawBody = (
+  req: http.IncomingMessage,
+  _res: http.ServerResponse,
+  buf: Buffer,
+) => {
+  if (buf && buf.length) {
+    (req as http.IncomingMessage & { rawBody?: Buffer }).rawBody = buf;
+  }
+};
+
+registerMcpActionLogIngestRoute(app);
+
+app.use(bodyParser.urlencoded({ extended: true, verify: captureRawBody }));
+app.use(bodyParser.json({ limit: "10mb", verify: captureRawBody }));
 
 app.use(cors()); // Add this line to enable CORS
 
@@ -77,7 +103,6 @@ if (config.EXPRESS_TRUST_PROXY) {
 }
 
 const serverAdapter = new ExpressAdapter();
-serverAdapter.setBasePath(`/admin/${config.BULL_AUTH_KEY}/queues`);
 
 const { addQueue, removeQueue, setQueues, replaceQueues } = createBullBoard({
   queues: [
@@ -85,11 +110,18 @@ const { addQueue, removeQueue, setQueues, replaceQueues } = createBullBoard({
     new BullMQAdapter(getDeepResearchQueue()),
     new BullMQAdapter(getBillingQueue()),
     new BullMQAdapter(getPrecrawlQueue()),
+    // SIEM audit delivery runs on RabbitMQ; inspect it in the broker's
+    // management UI, not here.
   ],
   serverAdapter: serverAdapter,
 });
 
-app.use(`/admin/${config.BULL_AUTH_KEY}/queues`, serverAdapter.getRouter());
+if (config.BULL_AUTH_KEY) {
+  serverAdapter.setBasePath(`/admin/${config.BULL_AUTH_KEY}/queues`);
+  app.use(`/admin/${config.BULL_AUTH_KEY}/queues`, serverAdapter.getRouter());
+} else {
+  logger.warn("BULL_AUTH_KEY is not set; admin routes are disabled.");
+}
 
 app.get("/", (_, res) => {
   res.json({
@@ -106,6 +138,7 @@ app.get("/e2e-test", (_, res) => {
 app.use(v0Router);
 app.use("/v1", v1Router);
 app.use("/v2", v2Router);
+app.use("/labs", labsRouter);
 app.use(adminRouter);
 
 const DEFAULT_PORT = config.PORT;
@@ -115,22 +148,30 @@ async function startServer(port = DEFAULT_PORT) {
   try {
     await initializeBlocklist();
     initializeEngineForcing();
+    warmExchangeCatalog();
   } catch (error) {
-    logger.error("Failed to initialize blocklist and engine forcing", {
+    logger.error("Failed to initialize API startup dependencies", {
       error,
     });
     throw error;
   }
 
-  // Attach WebSocket proxy to the Express app
-  attachWsProxy(app);
+  const mcpActionLogRetention = startMcpActionLogRetentionWorkerIfEnabled({
+    enabled: config.MCP_ACTION_LOG_STORAGE_ENABLED,
+    db,
+  });
+  const server = app.listen(Number(port), HOST, (error?: Error) => {
+    if (error) {
+      logger.error("Failed to start HTTP server", { error, port, host: HOST });
+      throw error;
+    }
 
-  const server = app.listen(Number(port), HOST, () => {
     logger.info(`Worker ${process.pid} listening on port ${port}`);
   });
 
   const exitHandler = async () => {
     logger.info("SIGTERM signal received: closing HTTP server");
+    mcpActionLogRetention?.stop();
     if (config.IS_KUBERNETES) {
       // Account for GCE load balancer drain timeout
       logger.info("Waiting 60s for GCE load balancer drain timeout");
@@ -234,6 +275,17 @@ app.use(
         success: false,
         code: "BAD_REQUEST_INVALID_JSON",
         error: "Bad request, malformed JSON",
+      });
+    }
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "status" in err &&
+      (err as { status?: number }).status === 413
+    ) {
+      return res.status(413).json({
+        success: false,
+        error: "Request body is too large",
       });
     }
 

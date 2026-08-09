@@ -44,15 +44,15 @@ final class FirecrawlHttpClient
      * @param array<string, string> $extraHeaders
      * @return array<string, mixed>
      */
-    public function post(string $path, array $body, array $extraHeaders = []): array
+    public function post(string $path, array $body, array $extraHeaders = [], ?float $timeoutSeconds = null): array
     {
-        return $this->request('POST', $this->baseUrl . $path, $body, $extraHeaders);
+        return $this->request('POST', $this->baseUrl . $path, $body, $extraHeaders, timeoutSeconds: $timeoutSeconds);
     }
 
     /** @return array<string, mixed> */
-    public function get(string $path): array
+    public function get(string $path, ?float $timeoutSeconds = null): array
     {
-        return $this->request('GET', $this->baseUrl . $path);
+        return $this->request('GET', $this->baseUrl . $path, timeoutSeconds: $timeoutSeconds);
     }
 
     /** @return array<string, mixed> */
@@ -65,6 +65,15 @@ final class FirecrawlHttpClient
     public function delete(string $path): array
     {
         return $this->request('DELETE', $this->baseUrl . $path);
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     * @return array<string, mixed>
+     */
+    public function patch(string $path, array $body): array
+    {
+        return $this->request('PATCH', $this->baseUrl . $path, $body);
     }
 
     /**
@@ -125,12 +134,17 @@ final class FirecrawlHttpClient
         array $body = [],
         array $extraHeaders = [],
         ?array $multipart = null,
+        ?float $timeoutSeconds = null,
     ): array {
         $defaultHeaders = [
-            'Authorization' => 'Bearer ' . $this->apiKey,
             'Accept' => 'application/json',
             'User-Agent' => 'firecrawl-php/' . Version::SDK_VERSION,
         ];
+        // Omit the Authorization header entirely when no key is set so that
+        // scrape/search/interact can use the keyless free tier.
+        if ($this->apiKey !== '') {
+            $defaultHeaders['Authorization'] = 'Bearer ' . $this->apiKey;
+        }
 
         if ($multipart === null) {
             $defaultHeaders['Content-Type'] = 'application/json';
@@ -143,9 +157,13 @@ final class FirecrawlHttpClient
             RequestOptions::HTTP_ERRORS => false,
         ];
 
+        if ($timeoutSeconds !== null) {
+            $options[RequestOptions::TIMEOUT] = $timeoutSeconds;
+        }
+
         if ($multipart !== null) {
             $options[RequestOptions::MULTIPART] = $multipart;
-        } elseif ($method === 'POST' && $body !== []) {
+        } elseif (($method === 'POST' || $method === 'PATCH') && $body !== []) {
             $options[RequestOptions::JSON] = $body;
         }
 

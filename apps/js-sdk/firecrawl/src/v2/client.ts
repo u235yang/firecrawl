@@ -7,6 +7,7 @@ import {
 import { parse as parseMethod } from "./methods/parse";
 import { search } from "./methods/search";
 import { map as mapMethod } from "./methods/map";
+import { feedback as feedbackMethod, searchFeedback as searchFeedbackMethod } from "./methods/feedback";
 import {
   startCrawl,
   getCrawlStatus,
@@ -32,6 +33,17 @@ import {
   listBrowsers,
 } from "./methods/browser";
 import { getConcurrency, getCreditUsage, getQueueStatus, getTokenUsage, getCreditUsageHistorical, getTokenUsageHistorical } from "./methods/usage";
+import { ResearchClient } from "./methods/research";
+import {
+  createMonitor as createMonitorMethod,
+  deleteMonitor as deleteMonitorMethod,
+  getMonitor as getMonitorMethod,
+  getMonitorCheck as getMonitorCheckMethod,
+  listMonitorChecks as listMonitorChecksMethod,
+  listMonitors as listMonitorsMethod,
+  runMonitor as runMonitorMethod,
+  updateMonitor as updateMonitorMethod,
+} from "./methods/monitor";
 import type {
   Document,
   ParseFile,
@@ -39,6 +51,9 @@ import type {
   ScrapeOptions,
   SearchData,
   SearchRequest,
+  EndpointFeedbackRequest,
+  FeedbackResponse,
+  SearchFeedbackRequest,
   MapData,
   MapOptions,
   CrawlResponse,
@@ -60,6 +75,14 @@ import type {
   ScrapeExecuteRequest,
   ScrapeExecuteResponse,
   ScrapeBrowserDeleteResponse,
+  CreateMonitorRequest,
+  ListMonitorChecksOptions,
+  ListMonitorsOptions,
+  Monitor,
+  MonitorCheck,
+  MonitorCheckDetail,
+  GetMonitorCheckOptions,
+  UpdateMonitorRequest,
 } from "./types";
 import { Watcher } from "./watcher";
 import type { WatcherOptions } from "./watcher";
@@ -92,12 +115,16 @@ export interface FirecrawlClientOptions {
   backoffFactor?: number;
 }
 
+/** Accepts a plain API key string or a full options object. */
+export type FirecrawlClientInput = FirecrawlClientOptions | string;
+
 /**
  * Firecrawl v2 client. Provides typed access to all v2 endpoints and utilities.
  */
 
 export class FirecrawlClient {
   private readonly http: HttpClient;
+  private _research?: ResearchClient;
 
   private isCloudService(url: string): boolean {
     return url.includes('api.firecrawl.dev');
@@ -105,22 +132,25 @@ export class FirecrawlClient {
 
   /**
    * Create a v2 client.
-   * @param options Transport configuration (API key, base URL, timeouts, retries).
+   * @param options API key string or transport configuration object.
    */
-  constructor(options: FirecrawlClientOptions = {}) {
-    const apiKey = options.apiKey ?? process.env.FIRECRAWL_API_KEY ?? "";
-    const apiUrl = (options.apiUrl ?? process.env.FIRECRAWL_API_URL ?? "https://api.firecrawl.dev").replace(/\/$/, "");
+  constructor(options: FirecrawlClientInput = {}) {
+    const opts: FirecrawlClientOptions =
+      typeof options === "string" ? { apiKey: options } : options;
 
-    if (this.isCloudService(apiUrl) && !apiKey) {
-      throw new Error("API key is required for the cloud API. Set FIRECRAWL_API_KEY env or pass apiKey.");
-    }
+    const apiKey = (opts.apiKey ?? process.env.FIRECRAWL_API_KEY ?? "").trim();
+    const apiUrl = (opts.apiUrl ?? process.env.FIRECRAWL_API_URL ?? "https://api.firecrawl.dev").replace(/\/$/, "");
+
+    // No API key is allowed: scrape, search, and interact fall back to the
+    // keyless free tier (rate-limited per IP). Other methods will return 401
+    // from the API until a key is provided.
 
     this.http = new HttpClient({
       apiKey,
       apiUrl,
-      timeoutMs: options.timeoutMs,
-      maxRetries: options.maxRetries,
-      backoffFactor: options.backoffFactor,
+      timeoutMs: opts.timeoutMs,
+      maxRetries: opts.maxRetries,
+      backoffFactor: opts.backoffFactor,
     });
   }
 
@@ -186,6 +216,7 @@ export class FirecrawlClient {
    * @param file File payload (data, filename, optional contentType).
    * @param options Optional parse options (formats, parsers, etc.).
    *                Note: parse does not support changeTracking, screenshot, branding,
+   *                audio, video,
    *                actions, waitFor, location, or mobile options.
    * @returns Parsed document with requested formats.
    */
@@ -207,6 +238,35 @@ export class FirecrawlClient {
    */
   async search(query: string, req: Omit<SearchRequest, "query"> = {}): Promise<SearchData> {
     return search(this.http, { query, ...req });
+  }
+
+  /**
+   * Submit feedback for a v2 job.
+   * @param request Feedback payload with endpoint, job id, rating, and supporting signals.
+   * @returns Feedback record and refund details.
+   */
+  async feedback(request: EndpointFeedbackRequest): Promise<FeedbackResponse> {
+    return feedbackMethod(this.http, request);
+  }
+
+  /**
+   * Submit feedback for a search job.
+   * @param jobId Search job id returned by search.
+   * @param request Search feedback payload.
+   * @returns Feedback record and refund details.
+   */
+  async searchFeedback(jobId: string, request: SearchFeedbackRequest): Promise<FeedbackResponse> {
+    return searchFeedbackMethod(this.http, jobId, request);
+  }
+
+  // Research
+  /**
+   * Access the v2 research endpoints (arXiv papers + GitHub history/readmes).
+   * Example: `firecrawl.research.searchPapers("diffusion models")`.
+   */
+  get research(): ResearchClient {
+    if (!this._research) this._research = new ResearchClient(this.http);
+    return this._research;
   }
 
   // Map
@@ -274,6 +334,73 @@ export class FirecrawlClient {
    */
   async crawlParamsPreview(url: string, prompt: string): Promise<Record<string, unknown>> {
     return crawlParamsPreview(this.http, url, prompt);
+  }
+
+  // Monitor
+  /**
+   * Create a scheduled monitor.
+   */
+  async createMonitor(request: CreateMonitorRequest): Promise<Monitor> {
+    return createMonitorMethod(this.http, request);
+  }
+
+  /**
+   * List monitors for the authenticated team.
+   */
+  async listMonitors(options?: ListMonitorsOptions): Promise<Monitor[]> {
+    return listMonitorsMethod(this.http, options);
+  }
+
+  /**
+   * Get a monitor by id.
+   */
+  async getMonitor(monitorId: string): Promise<Monitor> {
+    return getMonitorMethod(this.http, monitorId);
+  }
+
+  /**
+   * Update a monitor.
+   */
+  async updateMonitor(
+    monitorId: string,
+    request: UpdateMonitorRequest,
+  ): Promise<Monitor> {
+    return updateMonitorMethod(this.http, monitorId, request);
+  }
+
+  /**
+   * Delete a monitor.
+   */
+  async deleteMonitor(monitorId: string): Promise<boolean> {
+    return deleteMonitorMethod(this.http, monitorId);
+  }
+
+  /**
+   * Trigger a manual monitor check.
+   */
+  async runMonitor(monitorId: string): Promise<MonitorCheck> {
+    return runMonitorMethod(this.http, monitorId);
+  }
+
+  /**
+   * List checks for a monitor.
+   */
+  async listMonitorChecks(
+    monitorId: string,
+    options?: ListMonitorChecksOptions,
+  ): Promise<MonitorCheck[]> {
+    return listMonitorChecksMethod(this.http, monitorId, options);
+  }
+
+  /**
+   * Get a monitor check with paginated page results and inline diffs.
+   */
+  async getMonitorCheck(
+    monitorId: string,
+    checkId: string,
+    options?: GetMonitorCheckOptions,
+  ): Promise<MonitorCheckDetail> {
+    return getMonitorCheckMethod(this.http, monitorId, checkId, options);
   }
 
   // Batch
@@ -461,7 +588,56 @@ export class FirecrawlClient {
   watcher(jobId: string, opts: WatcherOptions = {}): Watcher {
     return new Watcher(this.http, jobId, opts);
   }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer scrape(). */
+  async scrapeUrl(url: string, options?: ScrapeOptions): Promise<Document> {
+    return this.scrape(url, options);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer crawl(). */
+  async crawlUrl(url: string, req: CrawlOptions & { pollInterval?: number; timeout?: number } = {}): Promise<CrawlJob> {
+    return this.crawl(url, req);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer startCrawl(). */
+  async asyncCrawlUrl(url: string, req: CrawlOptions = {}): Promise<CrawlResponse> {
+    return this.startCrawl(url, req);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer getCrawlStatus(). */
+  async checkCrawlStatus(jobId: string, pagination?: PaginationConfig): Promise<CrawlJob> {
+    return this.getCrawlStatus(jobId, pagination);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer getCrawlErrors(). */
+  async checkCrawlErrors(crawlId: string): Promise<CrawlErrorsResponse> {
+    return this.getCrawlErrors(crawlId);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer map(). */
+  async mapUrl(url: string, options?: MapOptions): Promise<MapData> {
+    return this.map(url, options);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer batchScrape(). */
+  async batchScrapeUrls(urls: string[], opts?: BatchScrapeOptions & { pollInterval?: number; timeout?: number }): Promise<BatchScrapeJob> {
+    return this.batchScrape(urls, opts);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer startBatchScrape(). */
+  async asyncBatchScrapeUrls(urls: string[], opts?: BatchScrapeOptions): Promise<BatchScrapeResponse> {
+    return this.startBatchScrape(urls, opts);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer getBatchScrapeStatus(). */
+  async checkBatchScrapeStatus(jobId: string, pagination?: PaginationConfig): Promise<BatchScrapeJob> {
+    return this.getBatchScrapeStatus(jobId, pagination);
+  }
+
+  /** @deprecated V1 compatibility alias for agent recovery. Prefer getBatchScrapeErrors(). */
+  async checkBatchScrapeErrors(jobId: string): Promise<CrawlErrorsResponse> {
+    return this.getBatchScrapeErrors(jobId);
+  }
 }
 
 export default FirecrawlClient;
-

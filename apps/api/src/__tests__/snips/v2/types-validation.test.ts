@@ -21,6 +21,11 @@ import {
   SearchRequestInput,
   toV2CrawlerOptions,
 } from "../../../controllers/v2/types";
+import {
+  createMonitorSchema,
+  updateMonitorSchema,
+} from "../../../services/monitoring/types";
+import { getNextMonitorRunAt } from "../../../services/monitoring/cron";
 
 describe("V2 Types Validation", () => {
   describe("scrapeRequestSchema", () => {
@@ -33,6 +38,29 @@ describe("V2 Types Validation", () => {
       expect(result.url).toBe("https://example.com");
       expect(result.origin).toBe("api");
       expect(result.formats).toEqual([{ type: "markdown" }]);
+      expect(result.skipTlsVerification).toBe(true);
+    });
+
+    it("should preserve explicit skipTlsVerification false", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        skipTlsVerification: false,
+      };
+
+      const result = scrapeRequestSchema.parse(input);
+      expect(result.skipTlsVerification).toBe(false);
+    });
+
+    it("should default skipTlsVerification to false when custom headers are used", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        headers: {
+          "x-test": "true",
+        },
+      };
+
+      const result = scrapeRequestSchema.parse(input);
+      expect(result.skipTlsVerification).toBe(false);
     });
 
     it("should accept valid scrape request with format objects", () => {
@@ -53,6 +81,24 @@ describe("V2 Types Validation", () => {
 
       const result = scrapeRequestSchema.parse(input);
       expect(result.formats).toEqual([{ type: "markdown" }, { type: "html" }]);
+    });
+
+    it("should accept video format as string and object", () => {
+      const stringInput: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: ["video"],
+      };
+      const objectInput: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [{ type: "video" }],
+      };
+
+      expect(scrapeRequestSchema.parse(stringInput).formats).toEqual([
+        { type: "video" },
+      ]);
+      expect(scrapeRequestSchema.parse(objectInput).formats).toEqual([
+        { type: "video" },
+      ]);
     });
 
     it("should accept valid scrape request with json format options", () => {
@@ -77,6 +123,92 @@ describe("V2 Types Validation", () => {
       expect(result.formats).toHaveLength(1);
       expect(result.formats[0].type).toBe("json");
       expect(result.timeout).toBe(60000); // Should be transformed from 30000
+    });
+
+    it("should accept query format without markdown", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [{ type: "query", prompt: "What is Firecrawl?" }],
+      };
+
+      const result = scrapeRequestSchema.parse(input);
+      expect(result.formats).toEqual([
+        { type: "query", prompt: "What is Firecrawl?", mode: "freeform" },
+      ]);
+    });
+
+    it("should accept query format directQuote mode", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [
+          {
+            type: "query",
+            prompt: "What is Firecrawl?",
+            mode: "directQuote",
+          },
+        ],
+      };
+
+      const result = scrapeRequestSchema.parse(input);
+      expect(result.formats).toEqual([
+        { type: "query", prompt: "What is Firecrawl?", mode: "directQuote" },
+      ]);
+    });
+
+    it("should accept question format", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [{ type: "question", question: "What is Firecrawl?" }],
+      };
+
+      const result = scrapeRequestSchema.parse(input);
+      expect(result.formats).toEqual([
+        { type: "question", question: "What is Firecrawl?" },
+      ]);
+    });
+
+    it("should accept highlights format", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [{ type: "highlights", query: "What is Firecrawl?" }],
+      };
+
+      const result = scrapeRequestSchema.parse(input);
+      expect(result.formats).toEqual([
+        { type: "highlights", query: "What is Firecrawl?" },
+      ]);
+    });
+
+    it("should reject invalid question and highlights fields", () => {
+      expect(() =>
+        scrapeRequestSchema.parse({
+          url: "https://example.com",
+          formats: [{ type: "question", question: "" }],
+        } satisfies ScrapeRequestInput),
+      ).toThrow();
+
+      expect(() =>
+        scrapeRequestSchema.parse({
+          url: "https://example.com",
+          formats: [{ type: "question", prompt: "What is Firecrawl?" } as any],
+        }),
+      ).toThrow();
+
+      expect(() =>
+        scrapeRequestSchema.parse({
+          url: "https://example.com",
+          formats: [{ type: "highlights", query: "" }],
+        } satisfies ScrapeRequestInput),
+      ).toThrow();
+
+      expect(() =>
+        scrapeRequestSchema.parse({
+          url: "https://example.com",
+          formats: [
+            { type: "highlights", prompt: "What is Firecrawl?" } as any,
+          ],
+        }),
+      ).toThrow();
     });
 
     it("should accept valid scrape request with changeTracking format", () => {
@@ -301,6 +433,24 @@ describe("V2 Types Validation", () => {
       expect(result.parsers).toBeDefined();
       expect((result.parsers as any)[0].type).toBe("pdf");
       expect((result.parsers as any)[0].maxPages).toBe(100);
+    });
+
+    it("should accept physical page markdown for PDF parsers", () => {
+      const result = scrapeRequestSchema.parse({
+        url: "https://example.com/file.pdf",
+        parsers: [{ type: "pdf", mode: "auto", pageMarkdown: true }],
+      });
+
+      expect((result.parsers as any)[0].pageMarkdown).toBe(true);
+    });
+
+    it("should reject non-boolean physical page markdown", () => {
+      expect(() =>
+        scrapeRequestSchema.parse({
+          url: "https://example.com/file.pdf",
+          parsers: [{ type: "pdf", pageMarkdown: "yes" }],
+        }),
+      ).toThrow();
     });
 
     it("should reject PDF parser with maxPages exceeding limit", () => {
@@ -658,7 +808,7 @@ describe("V2 Types Validation", () => {
         deduplicateSimilarURLs: false,
         ignoreQueryParameters: true,
         regexOnFullURL: true,
-        delay: 1000,
+        delay: 1,
         prompt: "Extract blog posts",
         scrapeOptions: {
           formats: [{ type: "markdown" }],
@@ -893,6 +1043,96 @@ describe("V2 Types Validation", () => {
       ]);
     });
 
+    it("should accept the developer category and reject its params", () => {
+      expect(
+        searchRequestSchema.parse({ query: "test", categories: ["developer"] })
+          .categories,
+      ).toEqual([{ type: "developer" }]);
+
+      expect(
+        searchRequestSchema.parse({
+          query: "test",
+          categories: [{ type: "developer" }],
+        }).categories,
+      ).toEqual([{ type: "developer" }]);
+
+      expect(() =>
+        searchRequestSchema.parse({
+          query: "test",
+          categories: [{ type: "developer", repos: ["firecrawl/firecrawl"] }],
+        }),
+      ).toThrow();
+    });
+
+    it("should normalize every developer category alias to developer", () => {
+      const aliases = [
+        "repo",
+        "code",
+        "developer",
+        "docs",
+        "devdex",
+        "repo_search",
+        "developer_index",
+      ];
+
+      for (const alias of aliases) {
+        expect(
+          searchRequestSchema.parse({ query: "test", categories: [alias] })
+            .categories,
+        ).toEqual([{ type: "developer" }]);
+
+        expect(
+          searchRequestSchema.parse({
+            query: "test",
+            categories: [{ type: alias }],
+          }).categories,
+        ).toEqual([{ type: "developer" }]);
+      }
+    });
+
+    it("should deduplicate developer aliases into one developer category", () => {
+      expect(
+        searchRequestSchema.parse({
+          query: "test",
+          categories: ["code", "developer"],
+        }).categories,
+      ).toEqual([{ type: "developer" }]);
+
+      expect(
+        searchRequestSchema.parse({
+          query: "test",
+          categories: [{ type: "repo_search" }, { type: "developer" }],
+        }).categories,
+      ).toEqual([{ type: "developer" }]);
+
+      expect(
+        searchRequestSchema.parse({
+          query: "test",
+          categories: ["docs", "github", "developer_index"],
+        }).categories,
+      ).toEqual([{ type: "developer" }, { type: "github" }]);
+    });
+
+    it("should reject developer alias params and unknown categories", () => {
+      expect(() =>
+        searchRequestSchema.parse({
+          query: "test",
+          categories: [{ type: "code", repos: ["firecrawl/firecrawl"] }],
+        }),
+      ).toThrow();
+
+      expect(() =>
+        searchRequestSchema.parse({ query: "test", categories: ["bogus"] }),
+      ).toThrow();
+
+      expect(() =>
+        searchRequestSchema.parse({
+          query: "test",
+          categories: [{ type: "bogus" }],
+        }),
+      ).toThrow();
+    });
+
     it("should accept search request with advanced categories format", () => {
       const input: SearchRequestInput = {
         query: "test",
@@ -912,6 +1152,44 @@ describe("V2 Types Validation", () => {
       const result = searchRequestSchema.parse(input);
       expect(result.categories).toBeDefined();
       expect(Array.isArray(result.categories)).toBe(true);
+    });
+
+    it("should accept search request with includeDomains", () => {
+      const input: SearchRequestInput = {
+        query: "test",
+        includeDomains: [" Example.com ", "docs.example.com"],
+      };
+
+      const result = searchRequestSchema.parse(input);
+      expect(result.includeDomains).toEqual([
+        "example.com",
+        "docs.example.com",
+      ]);
+    });
+
+    it("should accept search request with excludeDomains", () => {
+      const input: SearchRequestInput = {
+        query: "test",
+        excludeDomains: ["example.com", "spam.example.com"],
+      };
+
+      const result = searchRequestSchema.parse(input);
+      expect(result.excludeDomains).toEqual([
+        "example.com",
+        "spam.example.com",
+      ]);
+    });
+
+    it("should reject search request with includeDomains and excludeDomains", () => {
+      const input: SearchRequestInput = {
+        query: "test",
+        includeDomains: ["example.com"],
+        excludeDomains: ["spam.example.com"],
+      };
+
+      expect(() => searchRequestSchema.parse(input)).toThrow(
+        "includeDomains and excludeDomains cannot both be specified",
+      );
     });
 
     it("should reject limit exceeding 100", () => {
@@ -953,8 +1231,60 @@ describe("V2 Types Validation", () => {
 
       const result = searchRequestSchema.parse(input);
       expect(result.scrapeOptions?.formats).toEqual([
-        { type: "query", prompt: "What is Firecrawl?", directQuote: false },
+        { type: "query", prompt: "What is Firecrawl?", mode: "freeform" },
       ]);
+    });
+
+    it("should accept search scrapeOptions with question and highlights formats", () => {
+      const input: SearchRequestInput = {
+        query: "test",
+        scrapeOptions: {
+          formats: [
+            { type: "question", question: "What is Firecrawl?" },
+            { type: "highlights", query: "What is Firecrawl?" },
+          ],
+        },
+      };
+
+      const result = searchRequestSchema.parse(input);
+      expect(result.scrapeOptions?.formats).toEqual([
+        { type: "question", question: "What is Firecrawl?" },
+        { type: "highlights", query: "What is Firecrawl?" },
+      ]);
+    });
+
+    it("should reject search scrapeOptions query format with invalid mode", () => {
+      const input: SearchRequestInput = {
+        query: "test",
+        scrapeOptions: {
+          formats: [
+            {
+              type: "query",
+              prompt: "What is Firecrawl?",
+              mode: "quoted",
+            } as any,
+          ],
+        },
+      };
+
+      expect(() => searchRequestSchema.parse(input)).toThrow();
+    });
+
+    it("should reject search scrapeOptions query format with directQuote boolean", () => {
+      const input: SearchRequestInput = {
+        query: "test",
+        scrapeOptions: {
+          formats: [
+            {
+              type: "query",
+              prompt: "What is Firecrawl?",
+              directQuote: true,
+            } as any,
+          ],
+        },
+      };
+
+      expect(() => searchRequestSchema.parse(input)).toThrow();
     });
 
     it("should reject search scrapeOptions query prompt over 10000 characters", () => {
@@ -966,6 +1296,26 @@ describe("V2 Types Validation", () => {
       };
 
       expect(() => searchRequestSchema.parse(input)).toThrow();
+    });
+
+    it("should reject search scrapeOptions question and highlights values over 10000 characters", () => {
+      expect(() =>
+        searchRequestSchema.parse({
+          query: "test",
+          scrapeOptions: {
+            formats: [{ type: "question", question: "a".repeat(10001) }],
+          },
+        } satisfies SearchRequestInput),
+      ).toThrow();
+
+      expect(() =>
+        searchRequestSchema.parse({
+          query: "test",
+          scrapeOptions: {
+            formats: [{ type: "highlights", query: "a".repeat(10001) }],
+          },
+        } satisfies SearchRequestInput),
+      ).toThrow();
     });
   });
 
@@ -1059,6 +1409,181 @@ describe("V2 Types Validation", () => {
       expect(() => scrapeOptions.parse(input)).toThrow(
         "Total wait time (waitFor + wait actions) cannot exceed",
       );
+    });
+  });
+
+  describe("monitor schedules", () => {
+    it("should accept natural language schedule text", () => {
+      const result = createMonitorSchema.parse({
+        name: "Blog monitor",
+        schedule: {
+          text: "every 30 minutes",
+        },
+        targets: [
+          {
+            type: "scrape",
+            urls: ["https://example.com"],
+          },
+        ],
+      });
+
+      expect(result.schedule).toEqual({
+        cron: "*/30 * * * *",
+        timezone: "UTC",
+      });
+    });
+
+    it("should accept a natural language start minute", () => {
+      const result = updateMonitorSchema.parse({
+        schedule: {
+          text: "every 15 minutes starting at :07",
+        },
+      });
+
+      expect(result.schedule).toEqual({
+        cron: "7-59/15 * * * *",
+        timezone: "UTC",
+      });
+    });
+
+    it("should accept daily am/pm schedule text", () => {
+      const cases = [
+        ["daily at 9am", "0 9 * * *"],
+        ["daily at 9:30am", "30 9 * * *"],
+        ["daily at 5pm", "0 17 * * *"],
+        ["daily at 5:30 pm", "30 17 * * *"],
+        ["daily at 12am", "0 0 * * *"],
+        ["daily at 12pm", "0 12 * * *"],
+      ] as const;
+
+      for (const [text, cron] of cases) {
+        const result = updateMonitorSchema.parse({
+          schedule: { text },
+        });
+
+        expect(result.schedule).toEqual({
+          cron,
+          timezone: "UTC",
+        });
+      }
+    });
+
+    it("should reject invalid daily am/pm hours", () => {
+      expect(() =>
+        updateMonitorSchema.parse({
+          schedule: {
+            text: "daily at 13pm",
+          },
+        }),
+      ).toThrow("Daily schedule hour with am/pm must be between 1 and 12");
+    });
+
+    it("should reject ambiguous schedule definitions", () => {
+      expect(() =>
+        updateMonitorSchema.parse({
+          schedule: {
+            cron: "*/30 * * * *",
+            text: "every 30 minutes",
+          },
+        }),
+      ).toThrow("Schedule must include either cron or text, not both");
+    });
+
+    it("should calculate next runs in the configured timezone", () => {
+      const next = getNextMonitorRunAt(
+        "0 9 * * *",
+        new Date("2026-01-01T13:00:00.000Z"),
+        "America/New_York",
+      );
+
+      expect(next.toISOString()).toBe("2026-01-01T14:00:00.000Z");
+    });
+
+    it("should accept monitor webhook event filters", () => {
+      const result = updateMonitorSchema.parse({
+        webhook: {
+          url: "https://example.com/webhook",
+          events: ["monitor.page", "monitor.check.completed"],
+        },
+      });
+
+      expect(result.webhook?.events).toEqual([
+        "monitor.page",
+        "monitor.check.completed",
+      ]);
+    });
+
+    it("should reject non-monitor webhook event filters", () => {
+      expect(() =>
+        updateMonitorSchema.parse({
+          webhook: {
+            url: "https://example.com/webhook",
+            events: ["completed"],
+          },
+        }),
+      ).toThrow();
+    });
+  });
+
+  describe("monitor search target goal validation", () => {
+    const searchTargets = [
+      { type: "search" as const, queries: ["firecrawl launch"] },
+    ];
+
+    it("create rejects a search target without a goal", () => {
+      expect(() =>
+        createMonitorSchema.parse({
+          name: "Search monitor",
+          schedule: { text: "every 30 minutes" },
+          targets: searchTargets,
+        }),
+      ).toThrow("A search target requires a non-empty goal");
+    });
+
+    it("update accepts a patch adding a search target without restating the goal", () => {
+      // The monitor may already carry a goal; the controller validates the
+      // merged state.
+      const result = updateMonitorSchema.parse({ targets: searchTargets });
+      expect(result.targets).toHaveLength(1);
+    });
+
+    it("update rejects a patch that adds search targets while clearing the goal", () => {
+      for (const goal of [null, "", "   "]) {
+        expect(() =>
+          updateMonitorSchema.parse({ targets: searchTargets, goal }),
+        ).toThrow("A search target requires a non-empty goal");
+      }
+    });
+
+    it("update allows clearing the goal when the patch has no targets (merged state is checked in the controller)", () => {
+      const result = updateMonitorSchema.parse({ goal: null });
+      expect(result.goal).toBeNull();
+    });
+
+    it("create allows a raw search target (judgeEnabled:false) without a goal", () => {
+      const result = createMonitorSchema.parse({
+        name: "Raw search monitor",
+        schedule: { text: "every 30 minutes" },
+        targets: searchTargets,
+        judgeEnabled: false,
+      });
+      expect(result.targets).toHaveLength(1);
+      expect(result.judgeEnabled).toBe(false);
+    });
+
+    it("create still defaults judgeEnabled true when a goal is present", () => {
+      const result = createMonitorSchema.parse({
+        name: "Judged search monitor",
+        schedule: { text: "every 30 minutes" },
+        targets: searchTargets,
+        goal: "Alert when Firecrawl launches",
+      });
+      expect(result.judgeEnabled).toBe(true);
+    });
+
+    it("update with just { goal } does NOT silently enable judging", () => {
+      const result = updateMonitorSchema.parse({ goal: "Alert when X ships" });
+      expect(result.judgeEnabled).toBeUndefined();
     });
   });
 

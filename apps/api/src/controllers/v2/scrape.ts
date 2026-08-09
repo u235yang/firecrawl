@@ -14,6 +14,11 @@ import { hasFormatOfType } from "../../lib/format-utils";
 import { TransportableError } from "../../lib/error";
 import { NuQJob } from "../../services/worker/nuq";
 import { checkPermissions } from "../../lib/permissions";
+import {
+  actionTypesOf,
+  checkKeyFormatRestriction,
+  formatTypesOf,
+} from "../../lib/key-restriction";
 import { withSpan, setSpanAttributes, SpanKind } from "../../lib/otel-tracer";
 import { processJobInternal } from "../../services/worker/scrape-worker";
 import { ScrapeJobData } from "../../types";
@@ -24,6 +29,16 @@ import { getErrorContactMessage } from "../../lib/deployment";
 import { captureExceptionWithZdrCheck } from "../../services/sentry";
 import type { BillingMetadata } from "../../services/billing/types";
 import { getScrapeZDR } from "../../lib/zdr-helpers";
+import {
+  adjustKeylessCredits,
+  keylessLimitBody,
+  logKeylessCreditUsage,
+  reserveKeylessCredits,
+} from "../../lib/keyless";
+import { projectScrapeCredits } from "../../lib/keyless-credit-projection";
+import { applyAgentAuthDiscoveryHeader } from "../../lib/agent-auth-discovery";
+import { resolveThreatProtection } from "../../lib/threat-protection/request";
+import { getEffectiveConcurrencyLimit } from "../../lib/concurrency-limit";
 
 const AGENT_INTEROP_CONCURRENCY_BOOST = 3;
 
@@ -59,11 +74,33 @@ export async function scrapeController(
         });
       });
 
+      // Threat protection: resolve the effective policy (org config +
+      // per-request override). No-ops (null policy, zero I/O) for teams
+      // without the flag.
+      const threatProtection = await resolveThreatProtection({
+        teamId: req.auth.team_id,
+        orgId: req.acuc?.org_id ?? null,
+        flags: req.acuc?.flags ?? null,
+        override: req.body.threatProtection,
+      });
+      if (threatProtection.error) {
+        setSpanAttributes(span, {
+          "scrape.error": threatProtection.error,
+          "scrape.status_code": 403,
+        });
+        return res.status(403).json({
+          success: false,
+          error: threatProtection.error,
+        });
+      }
+
       // Permission check span
       const permissions = await withSpan(
         "api.scrape.check_permissions",
         async permSpan => {
-          const perms = checkPermissions(req.body, req.acuc?.flags);
+          const perms = checkPermissions(req.body, req.acuc?.flags, {
+            threatProtectionOrgConfig: threatProtection.orgConfig,
+          });
           setSpanAttributes(permSpan, {
             "permissions.success": !perms.error,
             "permissions.error": perms.error,
@@ -80,6 +117,23 @@ export async function scrapeController(
         return res.status(403).json({
           success: false,
           error: permissions.error,
+        });
+      }
+
+      const keyRestriction = await checkKeyFormatRestriction(
+        formatTypesOf(req.body.formats),
+        actionTypesOf(req.body.actions),
+        req.acuc?.api_key_id,
+        req.acuc?.flags ?? null,
+      );
+      if (!keyRestriction.allowed) {
+        setSpanAttributes(span, {
+          "scrape.error": keyRestriction.error,
+          "scrape.status_code": keyRestriction.status,
+        });
+        return res.status(keyRestriction.status).json({
+          success: false,
+          error: keyRestriction.error,
         });
       }
 
@@ -111,6 +165,33 @@ export async function scrapeController(
       const agentRequestId = req.body.__agentInterop?.requestId ?? null;
       const boostConcurrency =
         req.body.__agentInterop?.boostConcurrency ?? false;
+      const isDirectToBullMQ =
+        config.SEARCH_PREVIEW_TOKEN !== undefined &&
+        config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
+      const projectedKeylessCredits =
+        shouldBill && !isDirectToBullMQ
+          ? projectScrapeCredits(
+              req.body,
+              req.acuc?.flags ?? null,
+              zeroDataRetention,
+            )
+          : 0;
+      let reservedKeylessCredits = 0;
+      let reconciledKeylessCredits = false;
+
+      if (projectedKeylessCredits > 0) {
+        const reservation = await reserveKeylessCredits(
+          req.auth.team_id,
+          projectedKeylessCredits,
+        );
+        if (!reservation.ok) {
+          applyAgentAuthDiscoveryHeader(res);
+          return res.status(429).json(
+            await keylessLimitBody(req.auth.team_id, "v2_scrape"),
+          );
+        }
+        reservedKeylessCredits = projectedKeylessCredits;
+      }
 
       const logger = _logger.child({
         method: "scrapeController",
@@ -132,8 +213,10 @@ export async function scrapeController(
         account: req.account,
       });
 
+      let logRequestPromise: Promise<any> | undefined = undefined;
+
       if (!agentRequestId) {
-        logRequest({
+        logRequestPromise = logRequest({
           id: jobId,
           kind: "scrape",
           api_version: "v2",
@@ -156,10 +239,6 @@ export async function scrapeController(
 
       const origin = req.body.origin;
       const timeout = req.body.timeout;
-
-      const isDirectToBullMQ =
-        config.SEARCH_PREVIEW_TOKEN !== undefined &&
-        config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
 
       const totalWait =
         (req.body.waitFor ?? 0) +
@@ -185,7 +264,10 @@ export async function scrapeController(
         }
         req.on("close", () => aborter.abort());
 
-        const baseConcurrency = req.acuc?.concurrency || 1;
+        const baseConcurrency = await getEffectiveConcurrencyLimit(
+          req.auth.team_id,
+          req.acuc?.org_id,
+        );
         const concurrency = boostConcurrency
           ? baseConcurrency * AGENT_INTEROP_CONCURRENCY_BOOST
           : baseConcurrency;
@@ -249,7 +331,10 @@ export async function scrapeController(
                       bypassBilling: isDirectToBullMQ || !shouldBill,
                       zeroDataRetention,
                       teamFlags: req.acuc?.flags ?? null,
+                      orgId: req.acuc?.org_id ?? null,
+                      teamConcurrency: baseConcurrency,
                       agentIndexOnly: (req as any).agentIndexOnly ?? false,
+                      threatProtection: threatProtection.policy ?? undefined,
                     },
                     skipNuq: true,
                     origin,
@@ -259,7 +344,9 @@ export async function scrapeController(
                     zeroDataRetention,
                     apiKeyId: req.acuc?.api_key_id ?? null,
                     concurrencyLimited: limited,
+                    keylessReserved: reservedKeylessCredits > 0,
                     requestId: agentRequestId ?? undefined,
+                    logRequestPromise: logRequestPromise,
                   },
                 };
 
@@ -277,6 +364,13 @@ export async function scrapeController(
           },
         );
       } catch (e) {
+        if (reservedKeylessCredits > 0 && !reconciledKeylessCredits) {
+          reconciledKeylessCredits = true;
+          adjustKeylessCredits(req.auth.team_id, -reservedKeylessCredits).catch(
+            () => {},
+          );
+        }
+
         const timeoutErr =
           e instanceof TransportableError && e.code === "SCRAPE_TIMEOUT";
 
@@ -351,6 +445,28 @@ export async function scrapeController(
             });
           }
 
+          if (e.code === "unsafe_domain_blocked") {
+            setSpanAttributes(span, {
+              "scrape.status_code": 403,
+            });
+            return res.status(403).json({
+              success: false,
+              code: e.code,
+              error: e.message,
+            });
+          }
+
+          if (e.code === "SCRAPE_MEDIA_ACCESS_DENIED") {
+            setSpanAttributes(span, {
+              "scrape.status_code": 403,
+            });
+            return res.status(403).json({
+              success: false,
+              code: e.code,
+              error: e.message,
+            });
+          }
+
           const statusCode = e.code === "SCRAPE_TIMEOUT" ? 408 : 500;
           setSpanAttributes(span, {
             "scrape.status_code": statusCode,
@@ -403,6 +519,18 @@ export async function scrapeController(
         }
       }
 
+      if (reservedKeylessCredits > 0 && !reconciledKeylessCredits) {
+        reconciledKeylessCredits = true;
+        const actualKeylessCredits = doc?.metadata?.creditsUsed ?? 0;
+        adjustKeylessCredits(
+          req.auth.team_id,
+          actualKeylessCredits - reservedKeylessCredits,
+        ).catch(() => {});
+        logKeylessCreditUsage(req.auth.team_id, actualKeylessCredits).catch(
+          () => {},
+        );
+      }
+
       const totalRequestTime = new Date().getTime() - middlewareStartTime;
       const controllerTime = new Date().getTime() - controllerStartTime;
 
@@ -422,6 +550,8 @@ export async function scrapeController(
         !!hasFormatOfType(req.body.formats, "json") ||
         !!hasFormatOfType(req.body.formats, "summary") ||
         !!hasFormatOfType(req.body.formats, "branding") ||
+        !!hasFormatOfType(req.body.formats, "question") ||
+        !!hasFormatOfType(req.body.formats, "highlights") ||
         !!hasFormatOfType(req.body.formats, "query");
 
       if (!usedLlm) {

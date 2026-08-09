@@ -11,11 +11,14 @@ public class SearchOptions {
 
     private List<Object> sources;
     private List<Object> categories;
+    private List<String> includeDomains;
+    private List<String> excludeDomains;
     private Integer limit;
     private String tbs;
     private String location;
     private Boolean ignoreInvalidURLs;
     private Integer timeout;
+    private Boolean highlights;
     private ScrapeOptions scrapeOptions;
     private String integration;
 
@@ -23,11 +26,14 @@ public class SearchOptions {
 
     public List<Object> getSources() { return sources; }
     public List<Object> getCategories() { return categories; }
+    public List<String> getIncludeDomains() { return includeDomains; }
+    public List<String> getExcludeDomains() { return excludeDomains; }
     public Integer getLimit() { return limit; }
     public String getTbs() { return tbs; }
     public String getLocation() { return location; }
     public Boolean getIgnoreInvalidURLs() { return ignoreInvalidURLs; }
     public Integer getTimeout() { return timeout; }
+    public Boolean getHighlights() { return highlights; }
     public ScrapeOptions getScrapeOptions() { return scrapeOptions; }
     public String getIntegration() { return integration; }
 
@@ -36,11 +42,14 @@ public class SearchOptions {
     public static final class Builder {
         private List<Object> sources;
         private List<Object> categories;
+        private List<String> includeDomains;
+        private List<String> excludeDomains;
         private Integer limit;
         private String tbs;
         private String location;
         private Boolean ignoreInvalidURLs;
         private Integer timeout;
+        private Boolean highlights;
         private ScrapeOptions scrapeOptions;
         private String integration;
 
@@ -50,6 +59,10 @@ public class SearchOptions {
         public Builder sources(List<Object> sources) { this.sources = sources; return this; }
         /** Categories: "github", "research", "pdf". */
         public Builder categories(List<Object> categories) { this.categories = categories; return this; }
+        /** Domains to include in search results. */
+        public Builder includeDomains(List<String> includeDomains) { this.includeDomains = includeDomains; return this; }
+        /** Domains to exclude from search results. */
+        public Builder excludeDomains(List<String> excludeDomains) { this.excludeDomains = excludeDomains; return this; }
         /** Maximum number of results. */
         public Builder limit(Integer limit) { this.limit = limit; return this; }
         /** Time-based search filter (e.g., "qdr:d" for past day, "qdr:w" for past week). */
@@ -60,6 +73,8 @@ public class SearchOptions {
         public Builder ignoreInvalidURLs(Boolean ignoreInvalidURLs) { this.ignoreInvalidURLs = ignoreInvalidURLs; return this; }
         /** Timeout in milliseconds. */
         public Builder timeout(Integer timeout) { this.timeout = timeout; return this; }
+        /** Generate query-relevant highlights for search results. Defaults to true. */
+        public Builder highlights(Boolean highlights) { this.highlights = highlights; return this; }
         /** Scrape options applied to search result pages. */
         public Builder scrapeOptions(ScrapeOptions scrapeOptions) { this.scrapeOptions = scrapeOptions; return this; }
         /** Integration identifier. */
@@ -69,11 +84,14 @@ public class SearchOptions {
             SearchOptions o = new SearchOptions();
             o.sources = this.sources;
             o.categories = this.categories;
+            o.includeDomains = this.includeDomains;
+            o.excludeDomains = this.excludeDomains;
             o.limit = this.limit;
             o.tbs = this.tbs;
             o.location = this.location;
             o.ignoreInvalidURLs = this.ignoreInvalidURLs;
             o.timeout = this.timeout;
+            o.highlights = this.highlights;
             o.scrapeOptions = this.scrapeOptions;
             o.integration = this.integration;
             return o;

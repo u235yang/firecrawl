@@ -4,24 +4,22 @@ import {
   RequestWithAuth,
 } from "./types";
 import { Response } from "express";
-import { getRedisConnection } from "../../../src/services/queue-service";
+import { getCombinedTeamActiveCount } from "../../services/worker/nuq-router";
+import { getEffectiveConcurrencyLimit } from "../../lib/concurrency-limit";
 
 // Basically just middleware and error wrapping
 export async function concurrencyCheckController(
   req: RequestWithAuth<ConcurrencyCheckParams, undefined, undefined>,
   res: Response<ConcurrencyCheckResponse>,
 ) {
-  const concurrencyLimiterKey = "concurrency-limiter:" + req.auth.team_id;
-  const now = Date.now();
-  const activeJobsOfTeam = await getRedisConnection().zrangebyscore(
-    concurrencyLimiterKey,
-    now,
-    Infinity,
-  );
+  const activeJobsOfTeam = await getCombinedTeamActiveCount(req.auth.team_id);
 
   return res.status(200).json({
     success: true,
-    concurrency: activeJobsOfTeam.length,
-    maxConcurrency: req.acuc?.concurrency ?? 0,
+    concurrency: activeJobsOfTeam,
+    maxConcurrency: await getEffectiveConcurrencyLimit(
+      req.auth.team_id,
+      req.acuc?.org_id,
+    ),
   });
 }

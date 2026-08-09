@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Firecrawl.Exceptions;
 using Firecrawl.Models;
+using MonitorModel = Firecrawl.Models.Monitor;
 
 namespace Firecrawl;
 
@@ -258,7 +259,7 @@ public class FirecrawlClient
     /// </summary>
     /// <param name="file">The file to upload.</param>
     /// <param name="options">Optional parse options. Browser-only formats
-    /// (changeTracking, screenshot, branding), actions, waitFor, location,
+    /// (changeTracking, screenshot, branding, product, menu), actions, waitFor, location,
     /// and mobile are rejected.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     public async Task<Document> ParseAsync(
@@ -322,6 +323,122 @@ public class FirecrawlClient
     }
 
     // ================================================================
+    // MONITOR
+    // ================================================================
+
+    public async Task<MonitorModel> CreateMonitorAsync(
+        CreateMonitorRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var response = await _http.PostAsync<ApiResponse<MonitorModel>>(
+            "/v2/monitor", request, cancellationToken: cancellationToken);
+
+        return response.Data ?? throw new FirecrawlException("Create monitor response contained no data");
+    }
+
+    public async Task<List<MonitorModel>> ListMonitorsAsync(
+        int? limit = null,
+        int? offset = null,
+        CancellationToken cancellationToken = default)
+    {
+        var response = await _http.GetAsync<ApiResponse<List<MonitorModel>>>(
+            $"/v2/monitor{BuildQuery(limit, offset)}", cancellationToken);
+
+        return response.Data ?? new List<MonitorModel>();
+    }
+
+    public async Task<MonitorModel> GetMonitorAsync(
+        string monitorId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(monitorId);
+
+        var response = await _http.GetAsync<ApiResponse<MonitorModel>>(
+            $"/v2/monitor/{monitorId}", cancellationToken);
+
+        return response.Data ?? throw new FirecrawlException("Get monitor response contained no data");
+    }
+
+    public async Task<MonitorModel> UpdateMonitorAsync(
+        string monitorId,
+        UpdateMonitorRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(monitorId);
+        ArgumentNullException.ThrowIfNull(request);
+
+        var response = await _http.PatchAsync<ApiResponse<MonitorModel>>(
+            $"/v2/monitor/{monitorId}", request, cancellationToken);
+
+        return response.Data ?? throw new FirecrawlException("Update monitor response contained no data");
+    }
+
+    public async Task<bool> DeleteMonitorAsync(
+        string monitorId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(monitorId);
+
+        var response = await _http.DeleteAsync<Dictionary<string, object>>(
+            $"/v2/monitor/{monitorId}", cancellationToken);
+
+        return response.TryGetValue("success", out var success) && success switch
+        {
+            bool value => value,
+            JsonElement element when element.ValueKind == JsonValueKind.True => true,
+            _ => false
+        };
+    }
+
+    public async Task<MonitorCheck> RunMonitorAsync(
+        string monitorId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(monitorId);
+
+        var response = await _http.PostAsync<ApiResponse<MonitorCheck>>(
+            $"/v2/monitor/{monitorId}/run", new Dictionary<string, object>(), cancellationToken: cancellationToken);
+
+        return response.Data ?? throw new FirecrawlException("Run monitor response contained no data");
+    }
+
+    public async Task<List<MonitorCheck>> ListMonitorChecksAsync(
+        string monitorId,
+        int? limit = null,
+        int? offset = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(monitorId);
+
+        var response = await _http.GetAsync<ApiResponse<List<MonitorCheck>>>(
+            $"/v2/monitor/{monitorId}/checks{BuildQuery(limit, offset)}", cancellationToken);
+
+        return response.Data ?? new List<MonitorCheck>();
+    }
+
+    public async Task<MonitorCheckDetail> GetMonitorCheckAsync(
+        string monitorId,
+        string checkId,
+        int? limit = null,
+        int? skip = null,
+        string? status = null,
+        bool autoPaginate = true,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(monitorId);
+        ArgumentNullException.ThrowIfNull(checkId);
+
+        var response = await _http.GetAsync<ApiResponse<MonitorCheckDetail>>(
+            $"/v2/monitor/{monitorId}/checks/{checkId}{BuildMonitorCheckQuery(limit, skip, status)}",
+            cancellationToken);
+
+        var check = response.Data ?? throw new FirecrawlException("Get monitor check response contained no data");
+        return autoPaginate ? await PaginateMonitorCheckAsync(check, cancellationToken) : check;
+    }
+
+    // ================================================================
     // SEARCH
     // ================================================================
 
@@ -342,6 +459,113 @@ public class FirecrawlClient
             "/v2/search", body, cancellationToken: cancellationToken);
 
         return response.Data ?? throw new FirecrawlException("Search response contained no data");
+    }
+
+    /// <summary>
+    /// Searches research papers.
+    /// </summary>
+    public async Task<SearchPapersResponse> SearchPapersAsync(
+        string query,
+        SearchPapersOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+
+        return await _http.GetAsync<SearchPapersResponse>(
+            "/v2/search/research/papers" + BuildResearchQuery(new Dictionary<string, object?>
+            {
+                ["query"] = query,
+                ["origin"] = SdkOrigin,
+                ["k"] = options?.K,
+                ["authors"] = options?.Authors,
+                ["categories"] = options?.Categories,
+                ["from"] = options?.From,
+                ["to"] = options?.To
+            }),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Fetches paper metadata.
+    /// </summary>
+    public async Task<PaperMetadataResponse> InspectPaperAsync(
+        string paperId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paperId);
+
+        return await _http.GetAsync<PaperMetadataResponse>(
+            $"/v2/search/research/papers/{Uri.EscapeDataString(paperId)}",
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Fetches paper metadata and query-guided passages.
+    /// </summary>
+    public async Task<ReadPaperResponse> ReadPaperAsync(
+        string paperId,
+        string query,
+        ReadPaperOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paperId);
+        ArgumentNullException.ThrowIfNull(query);
+
+        return await _http.GetAsync<ReadPaperResponse>(
+            $"/v2/search/research/papers/{Uri.EscapeDataString(paperId)}"
+            + BuildResearchQuery(new Dictionary<string, object?>
+            {
+                ["query"] = query,
+                ["origin"] = SdkOrigin,
+                ["k"] = options?.K
+            }),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Finds papers related to a paper.
+    /// </summary>
+    public async Task<SimilarPapersResponse> RelatedPapersAsync(
+        string paperId,
+        string intent,
+        RelatedPapersOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paperId);
+        ArgumentNullException.ThrowIfNull(intent);
+
+        return await _http.GetAsync<SimilarPapersResponse>(
+            $"/v2/search/research/papers/{Uri.EscapeDataString(paperId)}/similar"
+            + BuildResearchQuery(new Dictionary<string, object?>
+            {
+                ["intent"] = intent,
+                ["origin"] = SdkOrigin,
+                ["mode"] = options?.Mode,
+                ["k"] = options?.K,
+                ["rerank"] = options?.Rerank,
+                ["anchor"] = options?.Anchor
+            }),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Searches GitHub research content.
+    /// </summary>
+    public async Task<GitHubSearchResponse> SearchGitHubAsync(
+        string query,
+        SearchGitHubOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+
+        return await _http.GetAsync<GitHubSearchResponse>(
+            "/v2/search/research/github" + BuildResearchQuery(new Dictionary<string, object?>
+            {
+                ["query"] = query,
+                ["origin"] = SdkOrigin,
+                ["k"] = options?.K
+            }),
+            cancellationToken);
     }
 
     // ================================================================
@@ -460,21 +684,120 @@ public class FirecrawlClient
         return job;
     }
 
+    private async Task<MonitorCheckDetail> PaginateMonitorCheckAsync(
+        MonitorCheckDetail check,
+        CancellationToken cancellationToken)
+    {
+        check.Pages ??= new List<MonitorCheckPage>();
+        var current = check;
+
+        while (!string.IsNullOrEmpty(current.Next))
+        {
+            var response = await _http.GetAbsoluteAsync<ApiResponse<MonitorCheckDetail>>(
+                current.Next, cancellationToken);
+            if (response.Data == null)
+                break;
+
+            var nextPage = response.Data;
+
+            if (nextPage.Pages is { Count: > 0 })
+                check.Pages.AddRange(nextPage.Pages);
+
+            current = nextPage;
+        }
+
+        check.Next = null;
+        return check;
+    }
+
     // ================================================================
     // INTERNAL UTILITIES
     // ================================================================
 
+    private const string SdkOrigin = "dotnet-sdk@1.10.1";
+
     private static Dictionary<string, object> BuildBody(object? options)
     {
+        Dictionary<string, object> body;
         if (options == null)
-            return new Dictionary<string, object>();
+        {
+            body = new Dictionary<string, object>();
+        }
+        else
+        {
+            var json = JsonSerializer.Serialize(options, FirecrawlHttpClient.JsonOptions);
+            body = JsonSerializer.Deserialize<Dictionary<string, object>>(json, FirecrawlHttpClient.JsonOptions)
+                ?? new Dictionary<string, object>();
+        }
 
-        var json = JsonSerializer.Serialize(options, FirecrawlHttpClient.JsonOptions);
-        return JsonSerializer.Deserialize<Dictionary<string, object>>(json, FirecrawlHttpClient.JsonOptions)
-            ?? new Dictionary<string, object>();
+        // Identify the SDK so the API can grant the keyless free tier; harmless
+        // telemetry on keyed requests.
+        if (!body.ContainsKey("origin"))
+            body["origin"] = SdkOrigin;
+
+        return body;
     }
 
-    private static string ResolveApiKey(string? apiKey)
+    private static string BuildQuery(int? limit = null, int? offset = null, string? status = null)
+    {
+        var query = new List<string>();
+        if (limit.HasValue)
+            query.Add($"limit={Uri.EscapeDataString(limit.Value.ToString())}");
+        if (offset.HasValue)
+            query.Add($"offset={Uri.EscapeDataString(offset.Value.ToString())}");
+        if (!string.IsNullOrWhiteSpace(status))
+            query.Add($"status={Uri.EscapeDataString(status)}");
+
+        return query.Count == 0 ? string.Empty : "?" + string.Join("&", query);
+    }
+
+    private static string BuildMonitorCheckQuery(int? limit = null, int? skip = null, string? status = null)
+    {
+        var query = new List<string>();
+        if (limit.HasValue)
+            query.Add($"limit={Uri.EscapeDataString(limit.Value.ToString())}");
+        if (skip.HasValue)
+            query.Add($"skip={Uri.EscapeDataString(skip.Value.ToString())}");
+        if (!string.IsNullOrWhiteSpace(status))
+            query.Add($"status={Uri.EscapeDataString(status)}");
+
+        return query.Count == 0 ? string.Empty : "?" + string.Join("&", query);
+    }
+
+    private static string BuildResearchQuery(Dictionary<string, object?> parameters)
+    {
+        var query = new List<string>();
+        foreach (var (key, value) in parameters)
+        {
+            if (value == null)
+                continue;
+
+            if (value is System.Collections.IEnumerable values && value is not string)
+            {
+                foreach (var item in values)
+                {
+                    if (item != null)
+                        AddQueryValue(query, key, item);
+                }
+                continue;
+            }
+
+            AddQueryValue(query, key, value);
+        }
+
+        return query.Count == 0 ? string.Empty : "?" + string.Join("&", query);
+    }
+
+    private static void AddQueryValue(List<string> query, string key, object value)
+    {
+        var stringValue = value is bool boolValue
+            ? boolValue.ToString().ToLowerInvariant()
+            : value.ToString() ?? string.Empty;
+
+        query.Add($"{Uri.EscapeDataString(key)}={Uri.EscapeDataString(stringValue)}");
+    }
+
+    private static string? ResolveApiKey(string? apiKey)
     {
         if (!string.IsNullOrWhiteSpace(apiKey))
             return apiKey;
@@ -483,8 +806,9 @@ public class FirecrawlClient
         if (!string.IsNullOrWhiteSpace(envKey))
             return envKey;
 
-        throw new FirecrawlException(
-            "API key is required. Pass it to the constructor or set the FIRECRAWL_API_KEY environment variable.");
+        // No key: scrape and search fall back to the keyless free tier (per-IP).
+        // Other endpoints return 401 from the API until a key is provided.
+        return null;
     }
 
     private static string ResolveApiUrl(string? apiUrl)

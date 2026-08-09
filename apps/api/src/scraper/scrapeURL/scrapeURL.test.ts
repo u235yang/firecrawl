@@ -1,3 +1,4 @@
+import type { MockedFunction } from "vitest";
 import "dotenv/config";
 
 import { config } from "../../config";
@@ -9,11 +10,12 @@ import { Engine } from "./engines";
 import { CostTracking } from "../../lib/cost-tracking";
 
 // Mock parseMarkdown but delegate to real implementation for other tests
-jest.mock("../../lib/html-to-markdown", () => {
-  const actual = jest.requireActual("../../lib/html-to-markdown");
+vi.mock("../../lib/html-to-markdown", async importOriginal => {
+  const actual =
+    await importOriginal<typeof import("../../lib/html-to-markdown")>();
   return {
     ...actual,
-    parseMarkdown: jest.fn(actual.parseMarkdown),
+    parseMarkdown: vi.fn(actual.parseMarkdown),
   };
 });
 
@@ -36,9 +38,9 @@ describe("Standalone scrapeURL tests", () => {
     it("Basic scrape", async () => {
       const out = await scrapeURL(
         "test:scrape-basic",
-        "https://www.roastmywebsite.ai/",
+        "https://firecrawl-test-site.vercel.app",
         scrapeOptions.parse({}),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -50,30 +52,21 @@ describe("Standalone scrapeURL tests", () => {
         expect(out.document).toHaveProperty("markdown");
         expect(out.document).toHaveProperty("metadata");
         expect(out.document).not.toHaveProperty("html");
-        expect(out.document.markdown).toContain("_Roast_");
+        expect(out.document.markdown).toContain("Firecrawl Test Site");
         expect(out.document.metadata.error).toBeUndefined();
-        expect(out.document.metadata.title).toBe("Roast My Website");
+        expect(out.document.metadata.title).toBe("Firecrawl Test Website");
         expect(out.document.metadata.description).toBe(
-          "Welcome to Roast My Website, the ultimate tool for putting your website through the wringer! This repository harnesses the power of Firecrawl to scrape and capture screenshots of websites, and then unleashes the latest LLM vision models to mercilessly roast them. 🌶️",
+          "Welcome to the Firecrawl Test Website!",
         );
-        expect(out.document.metadata.keywords).toBe(
-          "Roast My Website,Roast,Website,GitHub,Firecrawl",
-        );
-        expect(out.document.metadata.robots).toBe("follow, index");
-        expect(out.document.metadata.ogTitle).toBe("Roast My Website");
+        expect(out.document.metadata.ogTitle).toBe("Firecrawl Test Website");
         expect(out.document.metadata.ogDescription).toBe(
-          "Welcome to Roast My Website, the ultimate tool for putting your website through the wringer! This repository harnesses the power of Firecrawl to scrape and capture screenshots of websites, and then unleashes the latest LLM vision models to mercilessly roast them. 🌶️",
+          "Welcome to the Firecrawl Test Website!",
         );
-        expect(out.document.metadata.ogUrl).toBe(
-          "https://www.roastmywebsite.ai",
-        );
-        expect(out.document.metadata.ogImage).toBe(
-          "https://www.roastmywebsite.ai/og.png",
-        );
+        expect(out.document.metadata.ogUrl).toContain("firecrawl-test-site");
+        expect(out.document.metadata.ogImage).toContain("firecrawl-test-site");
         expect(out.document.metadata.ogLocaleAlternate).toStrictEqual([]);
-        expect(out.document.metadata.ogSiteName).toBe("Roast My Website");
         expect(out.document.metadata.sourceURL).toBe(
-          "https://www.roastmywebsite.ai/",
+          "https://firecrawl-test-site.vercel.app",
         );
         expect(out.document.metadata.statusCode).toBe(200);
       }
@@ -82,11 +75,11 @@ describe("Standalone scrapeURL tests", () => {
     it("Scrape with formats markdown and html", async () => {
       const out = await scrapeURL(
         "test:scrape-formats-markdown-html",
-        "https://roastmywebsite.ai",
+        "https://firecrawl-test-site.vercel.app",
         scrapeOptions.parse({
           formats: ["markdown", "html"],
         }),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -97,7 +90,7 @@ describe("Standalone scrapeURL tests", () => {
         expect(out.document).toHaveProperty("markdown");
         expect(out.document).toHaveProperty("html");
         expect(out.document).toHaveProperty("metadata");
-        expect(out.document.markdown).toContain("_Roast_");
+        expect(out.document.markdown).toContain("Firecrawl Test Site");
         expect(out.document.html).toContain("<h1");
         expect(out.document.metadata.statusCode).toBe(200);
         expect(out.document.metadata.error).toBeUndefined();
@@ -111,7 +104,7 @@ describe("Standalone scrapeURL tests", () => {
         scrapeOptions.parse({
           onlyMainContent: false,
         }),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -135,7 +128,7 @@ describe("Standalone scrapeURL tests", () => {
           onlyMainContent: false,
           excludeTags: [".nav", "#footer", "strong"],
         }),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -156,7 +149,7 @@ describe("Standalone scrapeURL tests", () => {
         "test:scrape-400",
         "https://httpstat.us/400",
         scrapeOptions.parse({}),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -175,7 +168,7 @@ describe("Standalone scrapeURL tests", () => {
         "test:scrape-401",
         "https://httpstat.us/401",
         scrapeOptions.parse({}),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -194,7 +187,7 @@ describe("Standalone scrapeURL tests", () => {
         "test:scrape-403",
         "https://httpstat.us/403",
         scrapeOptions.parse({}),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -213,7 +206,7 @@ describe("Standalone scrapeURL tests", () => {
         "test:scrape-404",
         "https://httpstat.us/404",
         scrapeOptions.parse({}),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -232,7 +225,7 @@ describe("Standalone scrapeURL tests", () => {
         "test:scrape-405",
         "https://httpstat.us/405",
         scrapeOptions.parse({}),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -251,7 +244,7 @@ describe("Standalone scrapeURL tests", () => {
         "test:scrape-500",
         "https://httpstat.us/500",
         scrapeOptions.parse({}),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -270,7 +263,7 @@ describe("Standalone scrapeURL tests", () => {
         "test:scrape-redirect",
         "https://scrapethissite.com/",
         scrapeOptions.parse({}),
-        { forceEngine, teamId: "test" },
+        { forceEngine, teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -303,7 +296,7 @@ describe("Standalone scrapeURL tests", () => {
           scrapeOptions.parse({
             formats: ["screenshot"],
           }),
-          { forceEngine, teamId: "test" },
+          { forceEngine, teamId: "test", orgId: null },
           new CostTracking(),
         );
 
@@ -332,7 +325,7 @@ describe("Standalone scrapeURL tests", () => {
           scrapeOptions.parse({
             formats: ["screenshot@fullPage"],
           }),
-          { forceEngine, teamId: "test" },
+          { forceEngine, teamId: "test", orgId: null },
           new CostTracking(),
         );
 
@@ -361,7 +354,7 @@ describe("Standalone scrapeURL tests", () => {
       "test:scrape-pdf",
       "https://arxiv.org/pdf/astro-ph/9301001.pdf",
       scrapeOptions.parse({}),
-      { teamId: "test" },
+      { teamId: "test", orgId: null },
       new CostTracking(),
     );
 
@@ -381,7 +374,7 @@ describe("Standalone scrapeURL tests", () => {
       "test:scrape-docx",
       "https://nvca.org/wp-content/uploads/2019/06/NVCA-Model-Document-Stock-Purchase-Agreement.docx",
       scrapeOptions.parse({}),
-      { teamId: "test" },
+      { teamId: "test", orgId: null },
       new CostTracking(),
     );
 
@@ -403,7 +396,7 @@ describe("Standalone scrapeURL tests", () => {
       "test:scrape-xlsx",
       "https://download.microsoft.com/download/1/4/E/14EDED28-6C58-4055-A65C-23B4DA81C4DE/Financial%20Sample.xlsx",
       scrapeOptions.parse({}),
-      { teamId: "test" },
+      { teamId: "test", orgId: null },
       new CostTracking(),
     );
 
@@ -444,7 +437,7 @@ describe("Standalone scrapeURL tests", () => {
           },
         },
       }),
-      { teamId: "test" },
+      { teamId: "test", orgId: null },
       new CostTracking(),
     );
 
@@ -481,7 +474,7 @@ describe("Standalone scrapeURL tests", () => {
           },
         },
       }),
-      { teamId: "test" },
+      { teamId: "test", orgId: null },
       new CostTracking(),
     );
 
@@ -508,7 +501,7 @@ describe("Standalone scrapeURL tests", () => {
         id,
         url,
         scrapeOptions.parse({}),
-        { teamId: "test" },
+        { teamId: "test", orgId: null },
         new CostTracking(),
       );
 
@@ -541,7 +534,7 @@ describe("Standalone scrapeURL tests", () => {
   );
 
   it("Sitemap scrape should not convert to markdown", async () => {
-    const mockParseMarkdown = parseMarkdown as jest.MockedFunction<
+    const mockParseMarkdown = parseMarkdown as MockedFunction<
       typeof parseMarkdown
     >;
     mockParseMarkdown.mockClear();
@@ -552,7 +545,7 @@ describe("Standalone scrapeURL tests", () => {
       scrapeOptions.parse({
         formats: ["rawHtml"],
       }),
-      { teamId: "sitemap" },
+      { teamId: "sitemap", orgId: null },
       new CostTracking(),
     );
 

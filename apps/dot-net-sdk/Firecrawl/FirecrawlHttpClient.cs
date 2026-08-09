@@ -14,7 +14,7 @@ namespace Firecrawl;
 internal class FirecrawlHttpClient
 {
     private readonly HttpClient _httpClient;
-    private readonly string _apiKey;
+    private readonly string? _apiKey;
     private readonly string _baseUrl;
     private readonly int _maxRetries;
     private readonly double _backoffFactor;
@@ -27,7 +27,7 @@ internal class FirecrawlHttpClient
     };
 
     internal FirecrawlHttpClient(
-        string apiKey,
+        string? apiKey,
         string baseUrl,
         TimeSpan timeout,
         int maxRetries,
@@ -139,6 +139,25 @@ internal class FirecrawlHttpClient
         return await ExecuteWithRetryAsync<T>(BuildRequest, cancellationToken);
     }
 
+    internal async Task<T> PatchAsync<T>(
+        string path,
+        object body,
+        CancellationToken cancellationToken = default)
+    {
+        var url = _baseUrl + path;
+        var json = JsonSerializer.Serialize(body, JsonOptions);
+
+        HttpRequestMessage BuildRequest()
+        {
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var request = new HttpRequestMessage(HttpMethod.Patch, url) { Content = content };
+            ApplyStandardHeaders(request);
+            return request;
+        }
+
+        return await ExecuteWithRetryAsync<T>(BuildRequest, cancellationToken);
+    }
+
     internal async Task<T> GetAbsoluteAsync<T>(string absoluteUrl, CancellationToken cancellationToken = default)
     {
         // Validate that the pagination URL belongs to the same host to prevent API key exfiltration
@@ -179,7 +198,10 @@ internal class FirecrawlHttpClient
 
     private void ApplyStandardHeaders(HttpRequestMessage request)
     {
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+        // Omit the Authorization header entirely when no key is set so that
+        // scrape/search can use the keyless free tier.
+        if (!string.IsNullOrEmpty(_apiKey))
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
 

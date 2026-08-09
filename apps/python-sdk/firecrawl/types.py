@@ -19,6 +19,7 @@ from .v2.types import (
     ScrapeRequest,
     ScrapeData,
     ScrapeResponse,
+    ThreatProtectionOptions,
     
     # Crawl types
     CrawlRequest,
@@ -46,6 +47,9 @@ from .v2.types import (
     SourceOption,
     Format,
     JsonFormat,
+    QuestionFormat,
+    HighlightsFormat,
+    QueryFormat,
     FormatOption,
     SearchRequest,
     SearchResultWeb,
@@ -99,6 +103,7 @@ __all__ = [
     'ScrapeRequest',
     'ScrapeData',
     'ScrapeResponse',
+    'ThreatProtectionOptions',
     
     # Crawl types
     'CrawlRequest',
@@ -127,6 +132,9 @@ __all__ = [
     'SourceOption',
     'Format',
     'JsonFormat',
+    'QuestionFormat',
+    'HighlightsFormat',
+    'QueryFormat',
     'FormatOption',
     'SearchRequest',
     'SearchResultWeb',

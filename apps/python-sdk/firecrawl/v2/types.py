@@ -39,6 +39,14 @@ warnings.filterwarnings(
     "ignore",
     message='Field name "json" in "Document" shadows an attribute in parent "BaseModel"',
 )
+warnings.filterwarnings(
+    "ignore",
+    message='Field name "json" in "MonitorPageDiff" shadows an attribute in parent "BaseModel"',
+)
+warnings.filterwarnings(
+    "ignore",
+    message='Field name "json" in "MonitorPageSnapshot" shadows an attribute in parent "BaseModel"',
+)
 
 T = TypeVar("T")
 
@@ -75,6 +83,7 @@ class DocumentMetadata(BaseModel):
     # Common metadata fields
     title: Optional[str] = None
     description: Optional[str] = None
+    # URL reported by the selected scrape engine.
     url: Optional[str] = None
     language: Optional[str] = None
     keywords: Optional[Union[str, List[str]]] = None
@@ -111,10 +120,13 @@ class DocumentMetadata(BaseModel):
     article_section: Optional[str] = None
 
     # Response-level metadata
+    # URL requested for the scrape.
     source_url: Optional[str] = None
+    # HTTP status code reported for the scrape response.
     status_code: Optional[int] = None
     scrape_id: Optional[str] = None
     num_pages: Optional[int] = None
+    total_pages: Optional[int] = None
     content_type: Optional[str] = None
     proxy_used: Optional[Literal["basic", "stealth"]] = None
     timezone: Optional[str] = None
@@ -203,6 +215,7 @@ class DocumentMetadata(BaseModel):
             if isinstance(v, list) and k in {
                 "status_code",
                 "num_pages",
+                "total_pages",
                 "credits_used",
             }:
                 first = v[0] if v else None
@@ -262,6 +275,169 @@ class BrandingProfile(BaseModel):
     personality: Optional[Dict[str, Any]] = None
 
 
+class ProductPrice(BaseModel):
+    """A monetary price for a product or variant."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    amount: float
+    currency: Optional[str] = None
+    formatted: Optional[str] = None
+
+
+class ProductAvailability(BaseModel):
+    """Availability information for a product or variant."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    in_stock: bool = Field(alias="inStock")
+    text: Optional[str] = None
+
+
+class ProductImage(BaseModel):
+    """An image associated with a product or variant."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    url: str
+    alt: Optional[str] = None
+
+
+class ProductSale(BaseModel):
+    """Sale information for a variant, holding the pre-sale price."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    original_price: ProductPrice = Field(alias="originalPrice")
+
+
+class ProductVariant(BaseModel):
+    """A purchasable variant of a product (e.g. a size/color combination)."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    id: Optional[str] = None
+    sku: Optional[str] = None
+    title: Optional[str] = None
+    values: Optional[Dict[str, Any]] = None
+    price: Optional[ProductPrice] = None
+    sale: Optional[ProductSale] = None
+    availability: ProductAvailability
+    images: Optional[List[ProductImage]] = None
+
+
+class ProductProfile(BaseModel):
+    """Structured product information extracted from a website."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    title: str
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    url: str
+    description: Optional[str] = None
+    variants: List[ProductVariant] = Field(default_factory=list)
+
+
+class MenuPrice(BaseModel):
+    """A monetary price for a menu item."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    amount: float
+    currency: Optional[str] = None
+    formatted: Optional[str] = None
+
+
+class MenuAvailability(BaseModel):
+    """Availability information for a menu item."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    in_stock: bool = Field(alias="inStock")
+    text: Optional[str] = None
+
+
+class MenuImage(BaseModel):
+    """An image associated with a menu item."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    url: str
+    alt: Optional[str] = None
+
+
+class MenuItemIdentifiers(BaseModel):
+    """External identifiers for a menu item."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    merchant_item_id: Optional[str] = Field(default=None, alias="merchantItemId")
+
+
+class MenuItem(BaseModel):
+    """A single item on a menu."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    id: str
+    name: str
+    description: Optional[str] = None
+    images: List[MenuImage] = Field(default_factory=list)
+    price: Optional[MenuPrice] = None
+    availability: MenuAvailability
+    dietary: List[str] = Field(default_factory=list)
+    calories: Optional[float] = None
+    option_groups: List[Any] = Field(default_factory=list, alias="optionGroups")
+    identifiers: MenuItemIdentifiers = Field(default_factory=MenuItemIdentifiers)
+    url: Optional[str] = None
+    source_url: str = Field(alias="sourceUrl")
+
+
+class MenuSection(BaseModel):
+    """An ordered group of menu items."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    id: str
+    name: str
+    description: Optional[str] = None
+    items: List[MenuItem] = Field(default_factory=list)
+
+
+class MenuMerchant(BaseModel):
+    """The merchant a menu belongs to."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    name: str
+    type: Optional[str] = None
+    location: Optional[Any] = None
+
+
+class MenuProfile(BaseModel):
+    """Structured menu information extracted from a website."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    is_menu: bool = Field(alias="isMenu")
+    confidence: float
+    merchant: MenuMerchant
+    currency: Optional[str] = None
+    sections: List[MenuSection] = Field(default_factory=list)
+    source_url: str = Field(alias="sourceUrl")
+
+
+RedactPIIEntity = Literal[
+    "PERSON",
+    "EMAIL",
+    "PHONE",
+    "LOCATION",
+    "FINANCIAL",
+    "SECRET",
+]
+
+
 class Document(BaseModel):
     """A scraped document."""
 
@@ -275,11 +451,15 @@ class Document(BaseModel):
     images: Optional[List[str]] = None
     screenshot: Optional[str] = None
     audio: Optional[str] = None
+    video: Optional[str] = None
     actions: Optional[Dict[str, Any]] = None
     answer: Optional[str] = None
+    highlights: Optional[str] = None
     warning: Optional[str] = None
     change_tracking: Optional[Dict[str, Any]] = None
     branding: Optional[BrandingProfile] = None
+    product: Optional[ProductProfile] = None
+    menu: Optional[MenuProfile] = None
 
     @property
     def metadata_typed(self) -> DocumentMetadata:
@@ -339,6 +519,23 @@ class AgentWebhookConfig(BaseModel):
     events: Optional[List[Literal["started", "action", "completed", "failed", "cancelled"]]] = None
 
 
+class MonitorWebhookConfig(BaseModel):
+    """Configuration for monitor webhooks.
+
+    Monitor webhooks support different events than crawl webhooks:
+    - monitor.page: One event per scraped URL as it finishes, with the
+      page-level diff status (`same` | `changed` | `new` | `removed` |
+      `error`).
+    - monitor.check.completed: A summary event sent after the full
+      monitor check is reconciled.
+    """
+
+    url: str
+    headers: Optional[Dict[str, str]] = None
+    metadata: Optional[Dict[str, str]] = None
+    events: Optional[List[Literal["monitor.page", "monitor.check.completed"]]] = None
+
+
 class WebhookData(BaseModel):
     """Data sent to webhooks."""
 
@@ -366,6 +563,8 @@ class Category(BaseModel):
     - "github": Filter results to GitHub repositories
     - "research": Filter results to research papers and academic sites
     - "pdf": Filter results to PDF files (adds filetype:pdf to search)
+    - "developer": Add developer results (issues, pull requests, READMEs and
+      documentation) under `.developer`
     """
 
     type: str
@@ -386,8 +585,11 @@ FormatString = Literal[
     "json",
     "attributes",
     "branding",
+    "product",
+    "menu",
     "query",
     "audio",
+    "video",
     # snake_case versions (user-friendly)
     "raw_html",
     "change_tracking",
@@ -410,6 +612,7 @@ class Format(BaseModel):
 class JsonFormat(Format):
     """Configuration for JSON extraction."""
 
+    type: Literal["json"] = "json"
     prompt: Optional[str] = None
     schema: Optional[Any] = None
 
@@ -417,6 +620,7 @@ class JsonFormat(Format):
 class ChangeTrackingFormat(Format):
     """Configuration for change tracking."""
 
+    type: Literal["change_tracking", "changeTracking"] = "change_tracking"
     modes: List[Literal["git-diff", "json"]]
     schema: Optional[Dict[str, Any]] = None
     prompt: Optional[str] = None
@@ -446,11 +650,26 @@ class AttributesFormat(Format):
     selectors: List[AttributeSelector]
 
 
+class QuestionFormat(Format):
+    """Configuration for question format - ask a question about the page content."""
+
+    type: Literal["question"] = "question"
+    question: str
+
+
+class HighlightsFormat(Format):
+    """Configuration for highlights format - extract direct highlights from page content."""
+
+    type: Literal["highlights"] = "highlights"
+    query: str
+
+
 class QueryFormat(Format):
-    """Configuration for query format - ask a question about the page content."""
+    """Deprecated query format. Use QuestionFormat or HighlightsFormat instead."""
 
     type: Literal["query"] = "query"
     prompt: str
+    mode: Optional[Literal["freeform", "directQuote"]] = None
 
 
 FormatOption = Union[
@@ -460,6 +679,8 @@ FormatOption = Union[
     ChangeTrackingFormat,
     ScreenshotFormat,
     AttributesFormat,
+    QuestionFormat,
+    HighlightsFormat,
     QueryFormat,
     Format,
 ]
@@ -494,10 +715,16 @@ class ScrapeFormats(BaseModel):
                     raise ValueError("query format must be an object with 'type' and 'prompt' fields")
                 normalized_formats.append(Format(type=format_item))
             elif isinstance(format_item, dict):
-                # Reject query dicts missing prompt early
+                fmt_type = format_item.get('type')
                 prompt = format_item.get('prompt')
-                if format_item.get('type') == 'query' and (not isinstance(prompt, str) or not prompt.strip()):
+                question = format_item.get('question')
+                query = format_item.get('query')
+                if fmt_type == 'query' and (not isinstance(prompt, str) or not prompt.strip()):
                     raise ValueError("query format requires a non-empty 'prompt' string")
+                if fmt_type == 'question' and (not isinstance(question, str) or not question.strip()):
+                    raise ValueError("question format requires a non-empty 'question' string")
+                if fmt_type == 'highlights' and (not isinstance(query, str) or not query.strip()):
+                    raise ValueError("highlights format requires a non-empty 'query' string")
                 # Preserve dicts as-is to avoid dropping custom fields like 'schema'
                 normalized_formats.append(format_item)
             elif isinstance(format_item, Format):
@@ -506,6 +733,62 @@ class ScrapeFormats(BaseModel):
                 raise ValueError(f"Invalid format format: {format_item}")
 
         return normalized_formats
+
+
+class RedactPIIOptions(BaseModel):
+    """Tuning options for the PII redaction step."""
+
+    # accurate (default): model-only. Best precision, cleanest output.
+    # aggressive: model + Presidio + spaCy. Higher recall, lower precision.
+    # fast: Presidio only, no model call. Lower F1, ~2x throughput.
+    mode: Optional[Literal["accurate", "aggressive", "fast"]] = None
+    # Restrict redaction to these entity buckets. Unset means all entities.
+    entities: Optional[List[RedactPIIEntity]] = None
+    # tag (default): replace spans with `<KIND>` placeholders.
+    # mask: replace spans with `*` of equal length.
+    # remove: drop span characters entirely.
+    replace_style: Optional[Literal["tag", "mask", "remove"]] = Field(
+        default=None, alias="replaceStyle"
+    )
+
+    model_config = {"populate_by_name": True}
+
+
+class ThreatProtectionOptions(BaseModel):
+    """Enterprise: per-request field-level override of your team's threat
+    protection policy.
+
+    Requires threat protection to be enabled for your team and request
+    overrides to be allowed in the team configuration. Only the fields you
+    explicitly provide replace the team policy's values.
+    """
+
+    # "off" disables scanning for this request; "normal" applies the policy.
+    mode: Optional[Literal["off", "normal"]] = None
+    # Block verdicts at or above this risk score (integer 0-100).
+    risk_score_threshold: Optional[int] = Field(
+        default=None, alias="riskScoreThreshold"
+    )
+    # Exact domains or globs like "*.example.com" to always block (max 1000).
+    blacklist: Optional[List[str]] = None
+    # Exact domains or globs to always allow; wins over everything (max 1000).
+    whitelist: Optional[List[str]] = None
+    # Lowercase TLDs without the leading dot, e.g. "zip" (max 1000).
+    blocked_tlds: Optional[List[str]] = Field(default=None, alias="blockedTlds")
+    # Behavior when scanning is unavailable: "closed" blocks, "open" allows.
+    failure_policy: Optional[Literal["open", "closed"]] = Field(
+        default=None, alias="failurePolicy"
+    )
+
+    model_config = {"populate_by_name": True}
+
+
+class AuditMetadata(BaseModel):
+    """User attribution included with SIEM logging events."""
+
+    username: str = Field(max_length=1024)
+
+    model_config = {"extra": "forbid"}
 
 
 class ScrapeOptions(BaseModel):
@@ -542,12 +825,25 @@ class ScrapeOptions(BaseModel):
     use_mock: Optional[str] = None
     block_ads: Optional[bool] = None
     proxy: Optional[Literal["basic", "stealth", "enhanced", "auto"]] = None
+    # Maximum age, in milliseconds, of indexed content that may be reused.
+    # Set to 0 to bypass index reuse.
     max_age: Optional[int] = None
     min_age: Optional[int] = None
     store_in_cache: Optional[bool] = None
     lockdown: Optional[bool] = None
+    redact_pii: Optional[Union[bool, RedactPIIOptions]] = Field(
+        default=None, alias="redactPII"
+    )
+    threat_protection: Optional[ThreatProtectionOptions] = Field(
+        default=None, alias="threatProtection"
+    )
+    audit_metadata: Optional[AuditMetadata] = Field(
+        default=None, alias="auditMetadata"
+    )
     profile: Optional[Dict[str, Any]] = None
     integration: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
 
     @field_validator("formats")
     @classmethod
@@ -641,11 +937,12 @@ class CrawlStatusRequest(BaseModel):
 
 
 class SearchResultWeb(BaseModel):
-    """A web search result with URL, title, and description."""
+    """A web search result with URL, title, description, and position."""
 
     url: str
     title: Optional[str] = None
     description: Optional[str] = None
+    position: Optional[int] = None
     category: Optional[str] = None
 
 
@@ -775,6 +1072,8 @@ class MapOptions(BaseModel):
     timeout: Optional[int] = None
     integration: Optional[str] = None
     location: Optional["Location"] = None
+    threat_protection: Optional[ThreatProtectionOptions] = None
+    audit_metadata: Optional[AuditMetadata] = None
 
 
 class MapRequest(BaseModel):
@@ -794,6 +1093,249 @@ class MapResponse(BaseResponse[MapData]):
     """Response for map operations."""
 
     pass
+
+
+# Monitor types
+class MonitorSchedule(BaseModel):
+    """Schedule for a monitor.
+
+    On create / update you provide exactly one of `cron` or `text`:
+
+    - `cron`: a 5-field cron expression (e.g. ``"*/30 * * * *"``).
+    - `text`: a natural-language schedule (e.g. ``"every 30 minutes"``,
+      ``"hourly"``, ``"daily at 9:00"``). Firecrawl normalizes this to a
+      cron expression server-side.
+
+    On read, the API always returns the normalized ``cron`` value, so
+    `cron` is populated in responses even when the monitor was created
+    with `text`.
+    """
+
+    cron: Optional[str] = None
+    text: Optional[str] = None
+    timezone: str = "UTC"
+
+
+class MonitorEmailNotification(BaseModel):
+    enabled: bool = False
+    recipients: List[str] = []
+    include_diffs: bool = Field(default=False, alias="includeDiffs")
+
+    model_config = {"populate_by_name": True}
+
+
+class MonitorNotification(BaseModel):
+    email: Optional[MonitorEmailNotification] = None
+
+
+class MonitorEmailRecipientSubscription(BaseModel):
+    """Per-recipient opt-in state for monitor email notifications.
+
+    External recipients (not members of the team that owns the monitor) must
+    confirm their subscription via a one-time email before they receive any
+    monitor notifications. Team members are auto-confirmed.
+
+    Statuses:
+      - ``pending``      - confirmation email sent, no notifications yet
+      - ``confirmed``    - notifications enabled
+      - ``unsubscribed`` - recipient opted out and cannot be re-added without
+                            a new confirmation flow
+    """
+
+    model_config = {"populate_by_name": True}
+
+    email: str
+    status: Literal["pending", "confirmed", "unsubscribed"]
+    source: Literal["team", "opt_in", "legacy"]
+    confirmation_email_sent: Optional[bool] = Field(
+        default=None, alias="confirmationEmailSent"
+    )
+
+
+class MonitorTarget(BaseModel):
+    """A scrape, crawl, or search target stored on a monitor."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    id: Optional[str] = None
+    type: Literal["scrape", "crawl", "search"]
+    urls: Optional[List[str]] = None
+    url: Optional[str] = None
+    scrape_options: Optional[Union[ScrapeOptions, Dict[str, Any]]] = Field(default=None, alias="scrapeOptions")
+    crawl_options: Optional[Dict[str, Any]] = Field(default=None, alias="crawlOptions")
+    # search target fields
+    queries: Optional[List[str]] = None
+    search_window: Optional[Literal["5m", "15m", "1h", "6h", "24h", "7d"]] = Field(default=None, alias="searchWindow")
+    include_domains: Optional[List[str]] = Field(default=None, alias="includeDomains")
+    exclude_domains: Optional[List[str]] = Field(default=None, alias="excludeDomains")
+    max_results: Optional[int] = Field(default=None, alias="maxResults")
+
+
+class MonitorCreateRequest(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    name: str
+    schedule: MonitorSchedule
+    webhook: Optional[MonitorWebhookConfig] = None
+    notification: Optional[MonitorNotification] = None
+    targets: List[Union[MonitorTarget, Dict[str, Any]]]
+    retention_days: Optional[int] = Field(default=None, alias="retentionDays")
+    goal: Optional[str] = None
+    judge_enabled: Optional[bool] = Field(default=None, alias="judgeEnabled")
+
+
+class MonitorUpdateRequest(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    name: Optional[str] = None
+    status: Optional[Literal["active", "paused"]] = None
+    schedule: Optional[MonitorSchedule] = None
+    webhook: Optional[Union[MonitorWebhookConfig, Dict[str, Any]]] = None
+    notification: Optional[Union[MonitorNotification, Dict[str, Any]]] = None
+    targets: Optional[List[Union[MonitorTarget, Dict[str, Any]]]] = None
+    retention_days: Optional[int] = Field(default=None, alias="retentionDays")
+    goal: Optional[str] = None
+    judge_enabled: Optional[bool] = Field(default=None, alias="judgeEnabled")
+
+
+class MonitorSummary(BaseModel):
+    total_pages: int = Field(default=0, alias="totalPages")
+    same: int = 0
+    changed: int = 0
+    new: int = 0
+    removed: int = 0
+    error: int = 0
+
+    model_config = {"populate_by_name": True}
+
+
+class Monitor(BaseModel):
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    id: str
+    name: str
+    status: Literal["active", "paused", "deleted"]
+    schedule: MonitorSchedule
+    next_run_at: Optional[str] = Field(default=None, alias="nextRunAt")
+    last_run_at: Optional[str] = Field(default=None, alias="lastRunAt")
+    current_check_id: Optional[str] = Field(default=None, alias="currentCheckId")
+    targets: List[Dict[str, Any]]
+    webhook: Optional[Dict[str, Any]] = None
+    notification: Optional[Dict[str, Any]] = None
+    # Present on create/update/get when the API has reconciled email
+    # recipients (i.e. notification.email.recipients is non-empty). Each
+    # entry reports a recipient's opt-in status.
+    email_recipient_subscriptions: Optional[List[MonitorEmailRecipientSubscription]] = (
+        Field(default=None, alias="emailRecipientSubscriptions")
+    )
+    retention_days: int = Field(alias="retentionDays")
+    estimated_credits_per_month: Optional[int] = Field(default=None, alias="estimatedCreditsPerMonth")
+    last_check_summary: Optional[MonitorSummary] = Field(default=None, alias="lastCheckSummary")
+    goal: Optional[str] = None
+    judge_enabled: Optional[bool] = Field(default=None, alias="judgeEnabled")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+
+class MonitorMeaningfulChange(BaseModel):
+    type: Literal["added", "removed", "changed"]
+    before: Optional[str] = None
+    after: Optional[str] = None
+    reason: str
+
+
+class MonitorPageJudgment(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    meaningful: bool
+    confidence: Literal["high", "medium", "low"]
+    reason: str
+    meaningful_changes: List[MonitorMeaningfulChange] = Field(default_factory=list, alias="meaningfulChanges")
+
+
+class MonitorTargetResult(BaseModel):
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    target_id: str = Field(alias="targetId")
+    type: Literal["scrape", "crawl", "search"]
+    expected_jobs: Optional[List[str]] = Field(default=None, alias="expectedJobs")
+    crawl_id: Optional[str] = Field(default=None, alias="crawlId")
+    search_completed: Optional[bool] = Field(default=None, alias="searchCompleted")
+    result_count: Optional[int] = Field(default=None, alias="resultCount")
+    matches: Optional[int] = None
+    summary: Optional[str] = None
+    judge_degraded: Optional[bool] = Field(default=None, alias="judgeDegraded")
+    degraded_reason: Optional[str] = Field(default=None, alias="degradedReason")
+    search_credits: Optional[int] = Field(default=None, alias="searchCredits")
+    judge_credits: Optional[int] = Field(default=None, alias="judgeCredits")
+    results_judged: Optional[int] = Field(default=None, alias="resultsJudged")
+
+
+class MonitorCheck(BaseModel):
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    id: str
+    monitor_id: str = Field(alias="monitorId")
+    status: Literal["queued", "running", "completed", "failed", "partial", "skipped_overlap", "skipped_no_credits"]
+    trigger: Literal["scheduled", "manual"]
+    scheduled_for: Optional[str] = Field(default=None, alias="scheduledFor")
+    started_at: Optional[str] = Field(default=None, alias="startedAt")
+    finished_at: Optional[str] = Field(default=None, alias="finishedAt")
+    estimated_credits: Optional[int] = Field(default=None, alias="estimatedCredits")
+    reserved_credits: Optional[int] = Field(default=None, alias="reservedCredits")
+    actual_credits: Optional[int] = Field(default=None, alias="actualCredits")
+    billing_status: Literal["not_applicable", "reserved", "confirmed", "released", "failed"] = Field(alias="billingStatus")
+    summary: MonitorSummary
+    target_results: Optional[List[MonitorTargetResult]] = Field(default=None, alias="targetResults")
+    notification_status: Optional[Any] = Field(default=None, alias="notificationStatus")
+    error: Optional[str] = None
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+
+class MonitorPageDiff(BaseModel):
+    """Diff payload returned alongside a monitor page.
+
+    Markdown-only monitors populate both `text` (unified diff) and `json`
+    (the parseDiff AST). JSON-extraction monitors populate `json` only,
+    where `json` is the per-field `{previous, current}` map. Mixed-mode
+    monitors (JSON + git-diff) populate both `json` (field diff) and
+    `text` (markdown sidecar).
+    """
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    text: Optional[str] = None
+    json: Optional[Any] = None  # markdown→parseDiff AST | json→field diff
+
+
+class MonitorPageSnapshot(BaseModel):
+    """Current JSON extraction at this run. JSON / mixed mode only."""
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    json: Optional[Dict[str, Any]] = None
+
+
+class MonitorCheckPage(BaseModel):
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    id: str
+    target_id: str = Field(alias="targetId")
+    url: str
+    status: Literal["same", "new", "changed", "removed", "error"]
+    previous_scrape_id: Optional[str] = Field(default=None, alias="previousScrapeId")
+    current_scrape_id: Optional[str] = Field(default=None, alias="currentScrapeId")
+    status_code: Optional[int] = Field(default=None, alias="statusCode")
+    error: Optional[str] = None
+    metadata: Optional[Any] = None
+    diff: Optional[MonitorPageDiff] = None
+    snapshot: Optional[MonitorPageSnapshot] = None
+    judgment: Optional[MonitorPageJudgment] = None
+    created_at: str = Field(alias="createdAt")
+
+
+class MonitorCheckDetail(MonitorCheck):
+    pages: List[MonitorCheckPage] = []
+    next: Optional[str] = None
 
 
 # Extract types
@@ -822,6 +1364,8 @@ class ExtractResponse(BaseModel):
     data: Optional[Any] = None
     error: Optional[str] = None
     warning: Optional[str] = None
+    warnings: Optional[List[str]] = None
+    replacement: Optional[str] = None
     sources: Optional[Dict[str, Any]] = None
     expires_at: Optional[datetime] = None
     credits_used: Optional[int] = None
@@ -858,6 +1402,7 @@ class BrowserExecuteResponse(BaseModel):
     """Response from executing code in a browser session."""
 
     success: bool
+    cdp_url: Optional[str] = None
     live_view_url: Optional[str] = None
     interactive_live_view_url: Optional[str] = None
     output: Optional[str] = None
@@ -1070,12 +1615,19 @@ class SearchRequest(BaseModel):
     query: str
     sources: Optional[List[SourceOption]] = None
     categories: Optional[List[CategoryOption]] = None
+    include_domains: Optional[List[str]] = None
+    exclude_domains: Optional[List[str]] = None
     limit: Optional[int] = 5
     tbs: Optional[str] = None
     location: Optional[str] = None
     ignore_invalid_urls: Optional[bool] = None
     timeout: Optional[int] = 300000
+    highlights: Optional[bool] = None
     scrape_options: Optional[ScrapeOptions] = None
+    # Enterprise search options. Use ["zdr"] for end-to-end Zero Data
+    # Retention or ["anon"] for anonymized search. Must be enabled for your team.
+    enterprise: Optional[List[str]] = None
+    threat_protection: Optional[ThreatProtectionOptions] = None
     integration: Optional[str] = None
 
     @field_validator("sources")
@@ -1118,6 +1670,15 @@ class SearchRequest(BaseModel):
 
         return normalized_categories
 
+    @model_validator(mode="after")
+    def validate_domain_filters(self):
+        """Validate mutually exclusive search domain filters."""
+        if self.include_domains and self.exclude_domains:
+            raise ValueError(
+                "include_domains and exclude_domains cannot both be specified"
+            )
+        return self
+
     # NOTE: parsers validation does not belong on SearchRequest; it is part of ScrapeOptions.
 
 
@@ -1139,6 +1700,23 @@ class SearchData(BaseModel):
     web: Optional[List[Union[SearchResultWeb, Document]]] = None
     news: Optional[List[Union[SearchResultNews, Document]]] = None
     images: Optional[List[Union[SearchResultImages, Document]]] = None
+    developer: Optional[List[Union[SearchResultWeb, Document]]] = None
+
+    @property
+    def data(self):
+        parts = []
+        if self.web:
+            parts.append(f".web ({len(self.web)} results)")
+        if self.news:
+            parts.append(f".news ({len(self.news)} results)")
+        if self.images:
+            parts.append(f".images ({len(self.images)} results)")
+        if self.developer:
+            parts.append(f".developer ({len(self.developer)} results)")
+        available = ", ".join(parts) if parts else ".web, .news, or .images"
+        raise AttributeError(
+            f"SearchData has no '.data'. Results are grouped by source: {available}"
+        )
 
 
 class SearchResponse(BaseResponse[SearchData]):

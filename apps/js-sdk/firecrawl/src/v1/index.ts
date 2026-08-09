@@ -114,6 +114,10 @@ export interface LocationConfig {
   languages?: string[];
 }
 
+export interface AuditMetadata {
+  username: string;
+}
+
 /**
  * Parameters for scraping operations.
  * Defines the options and configurations available for scraping web content.
@@ -135,6 +139,7 @@ export interface CrawlScrapeOptions {
   storeInCache?: boolean;
   maxAge?: number;
   parsePDF?: boolean;
+  auditMetadata?: AuditMetadata;
 }
 
 export type Action = {
@@ -310,6 +315,7 @@ export interface MapParams {
   timeout?: number;
   useIndex?: boolean;
   location?: LocationConfig;
+  auditMetadata?: AuditMetadata;
 }
 
 /**
@@ -363,6 +369,8 @@ export interface ExtractResponse<LLMSchema extends zt.ZodSchema = any> {
   data: LLMSchema;
   error?: string;
   warning?: string;
+  warnings?: string[];
+  replacement?: string;
   sources?: string[];
   creditsUsed?: number;
 }
@@ -490,6 +498,8 @@ export interface DeepResearchParams<LLMSchema extends zt.ZodSchema = any>  {
 export interface DeepResearchResponse {
   success: boolean;
   id: string;
+  warnings?: string[];
+  replacement?: string;
 }
 
 /**
@@ -530,6 +540,8 @@ export interface DeepResearchStatusResponse {
     description: string;
   }>;
   summaries: string[];
+  warnings?: string[];
+  replacement?: string;
 }
 
 /**
@@ -563,6 +575,8 @@ export interface GenerateLLMsTextParams {
 export interface GenerateLLMsTextResponse {
   success: boolean;
   id: string;
+  warnings?: string[];
+  replacement?: string;
 }
 
 /**
@@ -577,6 +591,8 @@ export interface GenerateLLMsTextStatusResponse {
   status: "processing" | "completed" | "failed";
   error?: string;
   expiresAt: string;
+  warnings?: string[];
+  replacement?: string;
 }
 
 /**
@@ -1626,6 +1642,7 @@ export default class FirecrawlApp {
    * @param onActivity - Optional callback to receive activity updates in real-time.
    * @param onSource - Optional callback to receive source updates in real-time.
    * @returns The final research results.
+   * @deprecated /v1/deep-research is deprecated. Use /v2/search instead.
    */
   async deepResearch(
     query: string, 
@@ -1713,6 +1730,7 @@ export default class FirecrawlApp {
    * Initiates a deep research operation on a given query without polling.
    * @param params - Parameters for the deep research operation.
    * @returns The response containing the research job ID.
+   * @deprecated /v1/deep-research is deprecated. Use /v2/search instead.
    */
   async asyncDeepResearch(query: string, params: DeepResearchParams<zt.ZodSchema>): Promise<DeepResearchResponse | ErrorResponse> {
     const headers = this.prepareHeaders();
@@ -1754,6 +1772,7 @@ export default class FirecrawlApp {
    * Checks the status of a deep research operation.
    * @param id - The ID of the deep research operation.
    * @returns The current status and results of the research operation.
+   * @deprecated /v1/deep-research is deprecated. Use /v2/search instead.
    */
   async checkDeepResearchStatus(id: string): Promise<DeepResearchStatusResponse | ErrorResponse> {
     const headers = this.prepareHeaders();
@@ -1921,6 +1940,7 @@ export default class FirecrawlApp {
    * @param url - The URL to generate LLMs.txt from.
    * @param params - Parameters for the LLMs.txt generation operation.
    * @returns The final generation results.
+   * @deprecated /v1/llmstxt is deprecated and will not be replaced.
    */
   async generateLLMsText(url: string, params?: GenerateLLMsTextParams): Promise<GenerateLLMsTextStatusResponse | ErrorResponse> {
     try {
@@ -1973,6 +1993,7 @@ export default class FirecrawlApp {
    * @param url - The URL to generate LLMs.txt from.
    * @param params - Parameters for the LLMs.txt generation operation.
    * @returns The response containing the generation job ID.
+   * @deprecated /v1/llmstxt is deprecated and will not be replaced.
    */
   async asyncGenerateLLMsText(url: string, params?: GenerateLLMsTextParams): Promise<GenerateLLMsTextResponse | ErrorResponse> {
     const headers = this.prepareHeaders();
@@ -2003,6 +2024,7 @@ export default class FirecrawlApp {
    * Checks the status of a LLMs.txt generation operation.
    * @param id - The ID of the LLMs.txt generation operation.
    * @returns The current status and results of the generation operation.
+   * @deprecated /v1/llmstxt is deprecated and will not be replaced.
    */
   async checkGenerateLLMsTextStatus(id: string): Promise<GenerateLLMsTextStatusResponse | ErrorResponse> {
     const headers = this.prepareHeaders();

@@ -34,7 +34,10 @@ export class HttpClient {
       baseURL: this.apiUrl,
       timeout: options.timeoutMs ?? 300000,
       headers: {
-        Authorization: `Bearer ${this.apiKey}`,
+        // Omit the Authorization header entirely when no API key is set so that
+        // scrape/search/interact can use the keyless free tier (the cloud only
+        // grants it when no Authorization header is present).
+        ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
       },
       transitional: { clarifyTimeoutError: true },
     });
@@ -147,6 +150,20 @@ export class HttpClient {
 
   delete<T = any>(endpoint: string, headers?: Record<string, string>) {
     return this.request<T>({ method: "delete", url: endpoint, headers });
+  }
+
+  patch<T = any>(
+    endpoint: string,
+    body: Record<string, unknown>,
+    options?: RequestOptions,
+  ) {
+    return this.request<T>({
+      method: "patch",
+      url: endpoint,
+      data: body,
+      headers: options?.headers,
+      timeout: options?.timeoutMs,
+    });
   }
 
   prepareHeaders(idempotencyKey?: string): Record<string, string> {

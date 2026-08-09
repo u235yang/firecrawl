@@ -83,12 +83,55 @@ $doc = $client->scrape('https://example.com/product', ScrapeOptions::with(
 echo $doc->getJson(); // Structured data
 ```
 
+### Product Extraction
+
+Use the `product` format on product pages for structured product extraction
+(title, brand, category, and per-variant price, availability, and images).
+It is the deterministic counterpart to the LLM-based `json` format, returned
+on the document's `getProduct()`.
+
+```php
+$doc = $client->scrape('https://example.com/product', ScrapeOptions::with(
+    formats: ['product'],
+));
+
+echo $doc->getProduct(); // Structured product data
+```
+
+### Menu Extraction
+
+Use the `menu` format on restaurant or merchant menu pages for structured menu
+extraction (merchant profile plus ordered sections, each holding items with
+per-item price, availability, dietary tags, and images). It is the
+deterministic counterpart to the LLM-based `json` format, returned on the
+document's `getMenu()`.
+
+```php
+$doc = $client->scrape('https://example.com/menu', ScrapeOptions::with(
+    formats: ['menu'],
+));
+
+echo $doc->getMenu(); // Structured menu data
+```
+
+### Video Extraction
+
+Use the `video` format on supported video URLs, including YouTube and TikTok. The returned `video` field is a signed URL to the extracted video file.
+
+```php
+$doc = $client->scrape('https://www.youtube.com/watch?v=dQw4w9WgXcQ', ScrapeOptions::with(
+    formats: ['video'],
+));
+
+echo $doc->getVideo();
+```
+
 ### Parse
 
 Upload a local file (`html`, `pdf`, `docx`, etc.) via multipart form data and
 parse it synchronously. Parse options intentionally exclude browser-only
-features such as change tracking, screenshot, branding, actions, waitFor,
-location, and mobile. The `proxy` option only accepts `"auto"` or `"basic"`.
+features such as change tracking, screenshot, branding, product, menu, audio, video, actions,
+waitFor, location, and mobile. The `proxy` option only accepts `"auto"` or `"basic"`.
 
 ```php
 use Firecrawl\Models\ParseFile;
@@ -343,6 +386,91 @@ class MyController
     }
 }
 ```
+
+### Laravel AI SDK Tools
+
+The SDK ships native tool classes for the [Laravel AI SDK](https://laravel.com/docs/ai-sdk)
+(`laravel/ai`, requires PHP 8.3+ and Laravel 12+):
+
+```bash
+composer require laravel/ai
+```
+
+Note for contributors: `laravel/ai` is also a dev dependency of this package,
+so running the SDK's own test suite requires PHP 8.3+.
+
+Add Firecrawl capabilities to any agent, no MCP server or manual HTTP calls needed.
+The tools resolve the `FirecrawlClient` from the container, so your existing
+`config/firecrawl.php` / `FIRECRAWL_API_KEY` setup is reused as-is:
+
+```php
+use Firecrawl\Laravel\Tools\FirecrawlScrape;
+use Firecrawl\Laravel\Tools\FirecrawlSearch;
+use Laravel\Ai\Contracts\Agent;
+use Laravel\Ai\Contracts\HasTools;
+use Laravel\Ai\Promptable;
+use Stringable;
+
+class ResearchAssistant implements Agent, HasTools
+{
+    use Promptable;
+
+    public function instructions(): Stringable|string
+    {
+        return 'You are a research assistant. Use the Firecrawl tools to find and read web content.';
+    }
+
+    public function tools(): iterable
+    {
+        return [
+            new FirecrawlScrape,
+            new FirecrawlSearch,
+        ];
+    }
+}
+
+$response = ResearchAssistant::make()->prompt('What does firecrawl.dev do?');
+```
+
+Available tools:
+
+| Class | Tool name | Wraps |
+|---|---|---|
+| `FirecrawlScrape` | `firecrawl_scrape` | Scrape one URL to markdown |
+| `FirecrawlSearch` | `firecrawl_search` | Web search with JSON results |
+| `FirecrawlMap` | `firecrawl_map` | Discover a site's URLs |
+| `FirecrawlCrawl` | `firecrawl_crawl` | Crawl multiple pages to markdown |
+
+Register all of them at once with the spread helper:
+
+```php
+use Firecrawl\Laravel\Tools\FirecrawlTools;
+
+public function tools(): iterable
+{
+    return [...FirecrawlTools::all()];
+}
+```
+
+Every tool also accepts an explicit client, for one-off credentials or use
+outside the container:
+
+```php
+use Firecrawl\Client\FirecrawlClient;
+
+new FirecrawlScrape(FirecrawlClient::create(apiKey: 'fc-other-key'));
+```
+
+Tool failures (rate limits, timeouts, invalid URLs) are returned to the model
+as readable error strings rather than thrown, so agent runs degrade gracefully.
+
+`firecrawl_crawl` waits up to 55 seconds for the crawl to finish and returns
+a JSON object with the crawl status and pages, so failed or partial crawls
+are visible to the model. If your agent runs inside a queued job, keep the
+crawl limit small or raise the worker's job timeout; on timeout the model
+receives a readable message and the crawl may still complete on the server.
+Extend `FirecrawlCrawl` and override `$timeoutSeconds` to change how long it
+waits.
 
 ## License
 

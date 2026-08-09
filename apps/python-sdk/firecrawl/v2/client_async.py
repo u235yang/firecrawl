@@ -13,6 +13,7 @@ from .types import (
     CrawlRequest,
     WebhookConfig,
     AgentWebhookConfig,
+    MonitorWebhookConfig,
     SearchRequest,
     SearchData,
     SourceOption,
@@ -36,6 +37,16 @@ from .types import (
     PDFAction,
     Location,
     PaginationConfig,
+    ThreatProtectionOptions,
+    AuditMetadata,
+    Monitor,
+    MonitorCheck,
+    MonitorCheckDetail,
+    MonitorCreateRequest,
+    MonitorNotification,
+    MonitorSchedule,
+    MonitorTarget,
+    MonitorUpdateRequest,
 )
 from .utils.http_client import HttpClient
 from .utils.http_client_async import AsyncHttpClient
@@ -50,7 +61,10 @@ from .methods.aio import usage as async_usage # type: ignore[attr-defined]
 from .methods.aio import extract as async_extract  # type: ignore[attr-defined]
 from .methods.aio import agent as async_agent  # type: ignore[attr-defined]
 from .methods.aio import browser as async_browser  # type: ignore[attr-defined]
+from .methods.aio import monitor as async_monitor  # type: ignore[attr-defined]
+from .methods.aio import research as async_research  # type: ignore[attr-defined]
 
+from .client import _SCRAPE_OPTION_KEYS
 from .watcher_async import AsyncWatcher
 
 class AsyncFirecrawlClient:
@@ -93,6 +107,21 @@ class AsyncFirecrawlClient:
     ):
         options = ScrapeOptions(**{k: v for k, v in kwargs.items() if v is not None}) if kwargs else None
         return await async_scrape.scrape(self.async_http_client, url, options)
+
+    async def search_papers(self, query: str, **kwargs):
+        return await async_research.search_papers(self.async_http_client, query, **kwargs)
+
+    async def inspect_paper(self, paper_id: str):
+        return await async_research.inspect_paper(self.async_http_client, paper_id)
+
+    async def read_paper(self, paper_id: str, query: str, **kwargs):
+        return await async_research.read_paper(self.async_http_client, paper_id, query, **kwargs)
+
+    async def related_papers(self, paper_id: str, intent: str, **kwargs):
+        return await async_research.related_papers(self.async_http_client, paper_id, intent, **kwargs)
+
+    async def search_github(self, query: str, **kwargs):
+        return await async_research.search_github(self.async_http_client, query, **kwargs)
 
     async def interact(
         self,
@@ -148,6 +177,46 @@ class AsyncFirecrawlClient:
         """Deprecated alias for stop_interaction()."""
         return await self.stop_interaction(job_id)
 
+    async def scrape_url(self, url: str, **kwargs):
+        """V1 compatibility alias for agent recovery. Prefer scrape()."""
+        return await self.scrape(url, **kwargs)
+
+    async def crawl_url(self, url: str, **kwargs):
+        """V1 compatibility alias for agent recovery. Prefer crawl()."""
+        return await self.crawl(url=url, **kwargs)
+
+    async def map_url(self, url: str, **kwargs):
+        """V1 compatibility alias for agent recovery. Prefer map()."""
+        return await self.map(url, **kwargs)
+
+    async def async_crawl_url(self, url: str, **kwargs):
+        """V1 compatibility alias for agent recovery. Prefer start_crawl()."""
+        return await self.start_crawl(url, **kwargs)
+
+    async def check_crawl_status(self, id: str, **kwargs):
+        """V1 compatibility alias for agent recovery. Prefer get_crawl_status()."""
+        return await self.get_crawl_status(id, **kwargs)
+
+    async def check_crawl_errors(self, id: str):
+        """V1 compatibility alias for agent recovery. Prefer get_crawl_errors()."""
+        return await self.get_crawl_errors(id)
+
+    async def batch_scrape_urls(self, urls, **kwargs):
+        """V1 compatibility alias for agent recovery. Prefer batch_scrape()."""
+        return await self.batch_scrape(urls, **kwargs)
+
+    async def async_batch_scrape_urls(self, urls, **kwargs):
+        """V1 compatibility alias for agent recovery. Prefer start_batch_scrape()."""
+        return await self.start_batch_scrape(urls, **kwargs)
+
+    async def check_batch_scrape_status(self, id: str, **kwargs):
+        """V1 compatibility alias for agent recovery. Prefer get_batch_scrape_status()."""
+        return await self.get_batch_scrape_status(id, **kwargs)
+
+    async def check_batch_scrape_errors(self, id: str):
+        """V1 compatibility alias for agent recovery. Prefer get_batch_scrape_errors()."""
+        return await self.get_batch_scrape_errors(id)
+
     async def parse(
         self,
         file: Union[str, Path, bytes, bytearray, BinaryIO],
@@ -175,6 +244,15 @@ class AsyncFirecrawlClient:
         return await async_search.search(self.async_http_client, request)
 
     async def start_crawl(self, url: str, **kwargs) -> CrawlResponse:
+        if kwargs.get("scrape_options") is None:
+            scrape_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in _SCRAPE_OPTION_KEYS and kwargs[k] is not None}
+            if scrape_kwargs:
+                kwargs["scrape_options"] = ScrapeOptions(**scrape_kwargs)
+        else:
+            for k in list(kwargs):
+                if k in _SCRAPE_OPTION_KEYS:
+                    kwargs.pop(k)
+
         sitemap = kwargs.pop("sitemap", None)
         ignore_sitemap = kwargs.pop("ignore_sitemap", None)
         if sitemap is None and ignore_sitemap is not None:
@@ -321,6 +399,8 @@ class AsyncFirecrawlClient:
         sitemap: Optional[Literal["only", "include", "skip"]] = None,
         timeout: Optional[int] = None,
         integration: Optional[str] = None,
+        threat_protection: Optional[ThreatProtectionOptions] = None,
+        audit_metadata: Optional[AuditMetadata] = None,
     ) -> MapData:
         options = MapOptions(
             search=search,
@@ -329,8 +409,124 @@ class AsyncFirecrawlClient:
             sitemap=sitemap if sitemap is not None else "include",
             timeout=timeout,
             integration=integration,
-        ) if any(v is not None for v in [search, include_subdomains, limit, sitemap, integration, timeout]) else None
+            threat_protection=threat_protection,
+            audit_metadata=audit_metadata,
+        ) if any(v is not None for v in [search, include_subdomains, limit, sitemap, integration, timeout, threat_protection, audit_metadata]) else None
         return await async_map.map(self.async_http_client, url, options)
+
+    async def create_monitor(
+        self,
+        name: str,
+        schedule: Union[MonitorSchedule, Dict[str, Any]],
+        targets: List[Union[MonitorTarget, Dict[str, Any]]],
+        *,
+        webhook: Optional[Union[MonitorWebhookConfig, Dict[str, Any]]] = None,
+        notification: Optional[MonitorNotification] = None,
+        retention_days: Optional[int] = None,
+        goal: Optional[str] = None,
+        judge_enabled: Optional[bool] = None,
+    ) -> Monitor:
+        if isinstance(schedule, dict):
+            schedule = MonitorSchedule(**schedule)
+        request = MonitorCreateRequest(
+            name=name,
+            schedule=schedule,
+            targets=targets,
+            webhook=webhook,
+            notification=notification,
+            retention_days=retention_days,
+            goal=goal,
+            judge_enabled=judge_enabled,
+        )
+        return await async_monitor.create_monitor(self.async_http_client, request)
+
+    async def list_monitors(
+        self,
+        *,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> List[Monitor]:
+        return await async_monitor.list_monitors(
+            self.async_http_client,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def get_monitor(self, monitor_id: str) -> Monitor:
+        return await async_monitor.get_monitor(self.async_http_client, monitor_id)
+
+    async def update_monitor(
+        self,
+        monitor_id: str,
+        *,
+        name: Optional[str] = None,
+        status: Optional[Literal["active", "paused"]] = None,
+        schedule: Optional[Union[MonitorSchedule, Dict[str, Any]]] = None,
+        webhook: Optional[Union[MonitorWebhookConfig, Dict[str, Any]]] = None,
+        notification: Optional[Union[MonitorNotification, Dict[str, Any]]] = None,
+        targets: Optional[List[Union[MonitorTarget, Dict[str, Any]]]] = None,
+        retention_days: Optional[int] = None,
+        goal: Optional[str] = None,
+        judge_enabled: Optional[bool] = None,
+    ) -> Monitor:
+        if isinstance(schedule, dict):
+            schedule = MonitorSchedule(**schedule)
+        request = MonitorUpdateRequest(
+            name=name,
+            status=status,
+            schedule=schedule,
+            webhook=webhook,
+            notification=notification,
+            targets=targets,
+            retention_days=retention_days,
+            goal=goal,
+            judge_enabled=judge_enabled,
+        )
+        return await async_monitor.update_monitor(
+            self.async_http_client,
+            monitor_id,
+            request,
+        )
+
+    async def delete_monitor(self, monitor_id: str) -> bool:
+        return await async_monitor.delete_monitor(self.async_http_client, monitor_id)
+
+    async def run_monitor(self, monitor_id: str) -> MonitorCheck:
+        return await async_monitor.run_monitor(self.async_http_client, monitor_id)
+
+    async def list_monitor_checks(
+        self,
+        monitor_id: str,
+        *,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> List[MonitorCheck]:
+        return await async_monitor.list_monitor_checks(
+            self.async_http_client,
+            monitor_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def get_monitor_check(
+        self,
+        monitor_id: str,
+        check_id: str,
+        *,
+        limit: Optional[int] = None,
+        skip: Optional[int] = None,
+        status: Optional[Literal["same", "new", "changed", "removed", "error"]] = None,
+        pagination_config: Optional[PaginationConfig] = None,
+    ) -> MonitorCheckDetail:
+        return await async_monitor.get_monitor_check(
+            self.async_http_client,
+            monitor_id,
+            check_id,
+            limit=limit,
+            skip=skip,
+            status=status,
+            pagination_config=pagination_config,
+        )
 
     async def start_batch_scrape(self, urls: List[str], **kwargs) -> Any:
         return await async_batch.start_batch_scrape(self.async_http_client, urls, **kwargs)
@@ -399,6 +595,7 @@ class AsyncFirecrawlClient:
         poll_interval: int = 2,
         timeout: Optional[int] = None,
         integration: Optional[str] = None,
+        threat_protection: Optional[ThreatProtectionOptions] = None,
     ):
         """Extract structured data and wait until completion (async).
 
@@ -421,6 +618,7 @@ class AsyncFirecrawlClient:
             poll_interval=poll_interval,
             timeout=timeout,
             integration=integration,
+            threat_protection=threat_protection,
         )
 
     async def get_extract_status(self, job_id: str):
@@ -446,6 +644,7 @@ class AsyncFirecrawlClient:
         scrape_options: Optional['ScrapeOptions'] = None,
         ignore_invalid_urls: Optional[bool] = None,
         integration: Optional[str] = None,
+        threat_protection: Optional[ThreatProtectionOptions] = None,
     ):
         """Start an extract job (non-blocking, async).
 
@@ -466,6 +665,7 @@ class AsyncFirecrawlClient:
             scrape_options=scrape_options,
             ignore_invalid_urls=ignore_invalid_urls,
             integration=integration,
+            threat_protection=threat_protection,
         )
 
     # Agent
@@ -482,6 +682,8 @@ class AsyncFirecrawlClient:
         strict_constrain_to_urls: Optional[bool] = None,
         model: Optional[Literal["spark-1-pro", "spark-1-mini"]] = None,
         webhook: Optional[Union[str, AgentWebhookConfig]] = None,
+        threat_protection: Optional[ThreatProtectionOptions] = None,
+        audit_metadata: Optional[AuditMetadata] = None,
     ):
         return await async_agent.agent(
             self.async_http_client,
@@ -495,6 +697,8 @@ class AsyncFirecrawlClient:
             strict_constrain_to_urls=strict_constrain_to_urls,
             model=model,
             webhook=webhook,
+            threat_protection=threat_protection,
+            audit_metadata=audit_metadata,
         )
 
     async def get_agent_status(self, job_id: str):
@@ -511,6 +715,8 @@ class AsyncFirecrawlClient:
         strict_constrain_to_urls: Optional[bool] = None,
         model: Optional[Literal["spark-1-pro", "spark-1-mini"]] = None,
         webhook: Optional[Union[str, AgentWebhookConfig]] = None,
+        threat_protection: Optional[ThreatProtectionOptions] = None,
+        audit_metadata: Optional[AuditMetadata] = None,
     ):
         return await async_agent.start_agent(
             self.async_http_client,
@@ -522,6 +728,8 @@ class AsyncFirecrawlClient:
             strict_constrain_to_urls=strict_constrain_to_urls,
             model=model,
             webhook=webhook,
+            threat_protection=threat_protection,
+            audit_metadata=audit_metadata,
         )
 
     async def cancel_agent(self, job_id: str) -> bool:

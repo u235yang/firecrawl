@@ -20,11 +20,16 @@ public class Document {
     private List<String> images;
     private String screenshot;
     private String audio;
+    private String video;
     private List<Map<String, Object>> attributes;
     private Map<String, Object> actions;
+    private String answer;
+    private String highlights;
     private String warning;
     private Map<String, Object> changeTracking;
     private Map<String, Object> branding;
+    private Product product;
+    private Menu menu;
 
     public String getMarkdown() { return markdown; }
     public String getHtml() { return html; }
@@ -36,11 +41,16 @@ public class Document {
     public List<String> getImages() { return images; }
     public String getScreenshot() { return screenshot; }
     public String getAudio() { return audio; }
+    public String getVideo() { return video; }
     public List<Map<String, Object>> getAttributes() { return attributes; }
     public Map<String, Object> getActions() { return actions; }
+    public String getAnswer() { return answer; }
+    public String getHighlights() { return highlights; }
     public String getWarning() { return warning; }
     public Map<String, Object> getChangeTracking() { return changeTracking; }
     public Map<String, Object> getBranding() { return branding; }
+    public Product getProduct() { return product; }
+    public Menu getMenu() { return menu; }
 
     @Override
     public String toString() {

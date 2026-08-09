@@ -17,11 +17,12 @@ import {
   didBrowserSessionUsePrompt,
   clearBrowserSessionPromptFlag,
 } from "../../lib/browser-sessions";
+import { getEffectiveConcurrencyLimit } from "../../lib/concurrency-limit";
 import {
-  getConcurrencyLimitActiveJobsCount,
-  pushConcurrencyLimitActiveJob,
-  removeConcurrencyLimitActiveJob,
-} from "../../lib/concurrency-limit";
+  getCombinedTeamActiveCount,
+  mirrorExternalSlotAcquire,
+  mirrorExternalSlotRelease,
+} from "../../services/worker/nuq-router";
 import {
   browserServiceRequest,
   BrowserServiceError,
@@ -44,6 +45,14 @@ import { sanitizeUrlForTrace } from "../../lib/scrape-interact/langsmith";
 import { getScrapeZDR } from "../../lib/zdr-helpers";
 import { RequestWithAuth, ScrapeOptions } from "./types";
 import { billTeam } from "../../services/billing/credit_billing";
+import {
+  KEYLESS_FREE_TIER_LIMIT_MESSAGE,
+  adjustKeylessCredits,
+  keylessTeamUuid,
+  keylessLimitBody,
+  logKeylessCreditUsage,
+  reserveKeylessCredits,
+} from "../../lib/keyless";
 import { enqueueBrowserSessionActivity } from "../../lib/browser-session-activity";
 import { logRequest } from "../../services/logging/log_job";
 import { integrationSchema } from "../../utils/integration";
@@ -54,6 +63,7 @@ import {
   calculateBrowserSessionCredits,
 } from "../../lib/browser-billing";
 import { autumnService } from "../../services/autumn/autumn.service";
+import { applyAgentAuthDiscoveryHeader } from "../../lib/agent-auth-discovery";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -90,6 +100,8 @@ type BrowserExecuteRequest = z.infer<typeof browserExecuteRequestSchema>;
 
 interface BrowserExecuteResponse {
   success: boolean;
+  sessionId?: string;
+  cdpUrl?: string;
   liveViewUrl?: string;
   interactiveLiveViewUrl?: string;
   output?: string;
@@ -134,13 +146,26 @@ export async function scrapeInteractController(
 
   // --- Validate scrape ownership ---
 
+  if (config.USE_DB_AUTHENTICATION !== true) {
+    return res.status(501).json({
+      success: false,
+      error:
+        "Scrape interact requires stored scrape context and is not available when database authentication is disabled.",
+    });
+  }
+
   const scrape = (await supabaseGetScrapeById(
     scrapeId,
   )) as ScrapeContextRow | null;
   if (!scrape) {
     return res.status(404).json({ success: false, error: "Job not found." });
   }
-  if (scrape.team_id !== req.auth.team_id) {
+  // Keyless scrapes are persisted under a deterministic per-IP UUID (the
+  // `scrapes.team_id` column is a UUID, so the raw `preview_keyless_<ip>` string
+  // can't be stored). Compare against that derived UUID for keyless requests.
+  const expectedScrapeTeam =
+    keylessTeamUuid(req.auth.team_id) ?? req.auth.team_id;
+  if (scrape.team_id !== expectedScrapeTeam) {
     return res.status(403).json({ success: false, error: "Forbidden." });
   }
 
@@ -193,6 +218,12 @@ export async function scrapeInteractController(
       (scrape.options as ScrapeOptions).profile,
     );
     if ("error" in created) {
+      if (
+        created.status === 429 &&
+        created.body.error === KEYLESS_FREE_TIER_LIMIT_MESSAGE
+      ) {
+        applyAgentAuthDiscoveryHeader(res);
+      }
       return res.status(created.status).json(created.body);
     }
     session = created.session;
@@ -248,7 +279,6 @@ export async function scrapeInteractController(
   // so LangSmith metadata filters don't match empty strings.
   const traceIdentity = {
     orgId: req.auth.org_id ?? undefined,
-    subUserId: req.acuc?.sub_user_id ?? undefined,
   };
 
   let execResult: BrowserServiceExecResponse | AgentResult;
@@ -341,6 +371,8 @@ export async function scrapeInteractController(
 
   return res.status(200).json({
     success: !hasError,
+    sessionId: session.id,
+    cdpUrl: session.cdp_url,
     liveViewUrl: session.cdp_path,
     interactiveLiveViewUrl: session.cdp_interactive_path,
     ...(agentOutput ? { output: agentOutput } : {}),
@@ -402,7 +434,7 @@ export async function scrapeStopInteractiveBrowserController(
   const claimed = await claimBrowserSessionDestroyed(session.id);
 
   invalidateActiveBrowserSessionCount(session.team_id).catch(() => {});
-  removeConcurrencyLimitActiveJob(session.team_id, session.id).catch(error => {
+  mirrorExternalSlotRelease(session.team_id, session.id).catch(error => {
     logger.error(
       "Failed to remove concurrency limiter entry for browser session",
       {
@@ -442,19 +474,25 @@ export async function scrapeStopInteractiveBrowserController(
     });
   });
 
-  billTeam(
-    req.auth.team_id,
-    req.acuc?.sub_id ?? undefined,
-    creditsBilled,
-    req.acuc?.api_key_id ?? null,
-    { endpoint: "interact", jobId: session.id },
-  ).catch(error => {
+  billTeam(req.auth.team_id, creditsBilled, req.acuc?.api_key_id ?? null, {
+    endpoint: "interact",
+    jobId: session.id,
+  }).catch(error => {
     logger.error("Failed to bill team for interact session", {
       error,
       creditsBilled,
       durationMs,
     });
   });
+
+  const reservedCredits = calculateBrowserSessionCredits(
+    session.ttl_total * 1000,
+    BROWSER_CREDITS_PER_HOUR,
+  );
+  adjustKeylessCredits(req.auth.team_id, creditsBilled - reservedCredits).catch(
+    () => {},
+  );
+  logKeylessCreditUsage(req.auth.team_id, creditsBilled).catch(() => {});
 
   logger.info("Browser session destroyed", {
     sessionDurationMs: durationMs,
@@ -514,13 +552,31 @@ async function createSessionForScrape(
 
   // Credit check (uses base rate — actual billing may be higher if prompts are used)
   const estimatedCredits = calculateBrowserSessionCredits(ttl * 1000);
+  const reservation = await reserveKeylessCredits(
+    req.auth.team_id,
+    estimatedCredits,
+  );
+  if (!reservation.ok) {
+    return {
+      status: 429,
+      body: await keylessLimitBody(req.auth.team_id, "v2_browser"),
+      error: true,
+    };
+  }
+  const keylessReserved = estimatedCredits;
+
   const autumnResult = await autumnService.checkCredits({
     teamId: req.auth.team_id,
     value: estimatedCredits,
-    properties: { source: "scrapeBrowserCreate", path: req.path },
+    properties: {
+      source: "scrapeBrowserCreate",
+      path: req.path,
+      apiKeyId: req.acuc?.api_key_id ?? null,
+    },
   });
 
   if (autumnResult !== null && !autumnResult.allowed) {
+    adjustKeylessCredits(req.auth.team_id, -keylessReserved).catch(() => {});
     return {
       status: 402,
       body: {
@@ -532,11 +588,13 @@ async function createSessionForScrape(
   }
 
   // Active session limit — uses the same concurrency pool as scrape/crawl
-  const concurrencyLimit = req.acuc?.concurrency ?? 2;
-  const activeCount = await getConcurrencyLimitActiveJobsCount(
+  const concurrencyLimit = await getEffectiveConcurrencyLimit(
     req.auth.team_id,
+    req.acuc?.org_id,
   );
+  const activeCount = await getCombinedTeamActiveCount(req.auth.team_id);
   if (activeCount >= concurrencyLimit) {
+    adjustKeylessCredits(req.auth.team_id, -keylessReserved).catch(() => {});
     return {
       status: 429,
       body: {
@@ -571,6 +629,11 @@ async function createSessionForScrape(
         "/browsers",
         {
           ttl,
+          // Record interact sessions so the replay endpoints (which we expose
+          // via the returned sessionId) have data. Set explicitly rather than
+          // relying on the browser service's implicit default, matching the
+          // standalone browser create path.
+          record: true,
           ...(activityTtl !== undefined ? { activityTtl } : {}),
           ...(persistentStorage !== undefined ? { persistentStorage } : {}),
         },
@@ -578,6 +641,9 @@ async function createSessionForScrape(
       break;
     } catch (err) {
       if (err instanceof BrowserServiceError && err.status === 409) {
+        adjustKeylessCredits(req.auth.team_id, -keylessReserved).catch(
+          () => {},
+        );
         return {
           status: 409,
           body: {
@@ -601,6 +667,7 @@ async function createSessionForScrape(
   }
 
   if (!svcResponse) {
+    adjustKeylessCredits(req.auth.team_id, -keylessReserved).catch(() => {});
     logger.error("Failed to create browser session after all retries", {
       error: lastCreateError,
     });
@@ -633,9 +700,21 @@ async function createSessionForScrape(
       );
     }
 
-    // Ensure only one tab exists with the content page in the foreground.
-    // The replay may have created extra tabs. Find the one with content,
-    // close everything else, update the REPL's page var, and bring to front.
+    // Prime agent-browser before consolidating: its first command of a session
+    // spawns an about:blank tab, so trigger it now and let the sync below close it.
+    const primeResult = await browserServiceRequest<BrowserServiceExecResponse>(
+      "POST",
+      `/browsers/${svcResponse.sessionId}/exec`,
+      {
+        code: `agent-browser get url`,
+        language: "bash",
+        timeout: 10,
+        origin: "scrape_replay_sync",
+      },
+    ).catch(() => null);
+
+    // Keep only the content tab, repoint the REPL's page var, bring to front.
+    // agent-browser falls back to the surviving tab when its own is closed.
     await browserServiceRequest(
       "POST",
       `/browsers/${svcResponse.sessionId}/exec`,
@@ -656,19 +735,23 @@ async function createSessionForScrape(
       },
     ).catch(() => {});
 
-    // Sync agent-browser to the correct page
-    const syncResult = await browserServiceRequest<BrowserServiceExecResponse>(
-      "POST",
-      `/browsers/${svcResponse.sessionId}/exec`,
-      {
-        code: `agent-browser get url`,
-        language: "bash",
-        timeout: 10,
-        origin: "scrape_replay_sync",
-      },
-    );
+    // Verify agent-browser is on the content page after cleanup.
+    let agentUrl = (primeResult?.stdout || "").trim();
+    if (!agentUrl || agentUrl === "about:blank") {
+      const syncResult =
+        await browserServiceRequest<BrowserServiceExecResponse>(
+          "POST",
+          `/browsers/${svcResponse.sessionId}/exec`,
+          {
+            code: `agent-browser get url`,
+            language: "bash",
+            timeout: 10,
+            origin: "scrape_replay_sync",
+          },
+        );
+      agentUrl = (syncResult.stdout || "").trim();
+    }
 
-    const agentUrl = (syncResult.stdout || "").trim();
     if (!agentUrl || agentUrl === "about:blank") {
       logger.info("agent-browser on wrong page after replay, navigating", {
         agentUrl,
@@ -686,6 +769,7 @@ async function createSessionForScrape(
       );
     }
   } catch (err) {
+    adjustKeylessCredits(req.auth.team_id, -keylessReserved).catch(() => {});
     logger.error("Failed to initialize scrape browser session context", {
       error: err,
     });
@@ -738,14 +822,13 @@ async function createSessionForScrape(
 
     // Register in the shared concurrency limiter so this session counts
     // against the team's concurrent job limit while it's active.
-    pushConcurrencyLimitActiveJob(
-      req.auth.team_id,
-      sessionId,
-      ttl * 1000,
-    ).catch(() => {});
+    mirrorExternalSlotAcquire(req.auth.team_id, sessionId, ttl * 1000).catch(
+      () => {},
+    );
 
     return { session };
   } catch (err) {
+    adjustKeylessCredits(req.auth.team_id, -keylessReserved).catch(() => {});
     logger.error("Failed to persist browser session, cleaning up", {
       error: err,
     });

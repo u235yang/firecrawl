@@ -18,9 +18,16 @@ type ScrapeJobCommon = {
   team_id: string;
   zeroDataRetention: boolean;
   billing?: BillingMetadata;
+  keylessReserved?: boolean;
   traceContext?: SerializedTraceContext;
   skipNuq?: boolean;
   requestId?: string;
+  monitoring?: {
+    monitorId: string;
+    checkId: string;
+    targetId: string;
+    source: "explicit" | "discovered";
+  };
 };
 
 export type ScrapeJobData = ScrapeJobCommon &
@@ -56,6 +63,8 @@ type ScrapeJobSingleUrlsUnique = {
   sentry?: any;
   is_extract?: boolean;
   apiKeyId: number | null;
+
+  logRequestPromise?: Promise<any>;
 };
 
 export type ScrapeJobSingleUrls = ScrapeJobCommon & ScrapeJobSingleUrlsUnique;
@@ -145,7 +154,13 @@ export enum RateLimiterMode {
   ExtractAgentPreview = "extractAgentPreview",
   Browser = "browser",
   BrowserExecute = "browserExecute",
+  BrowserReplay = "browserReplay",
   Account = "account",
+  SupportAsk = "supportAsk",
+  SupportDocsSearch = "supportDocsSearch",
+  Research = "research",
+  DeveloperSearch = "developerSearch",
+  Labs = "labs",
 }
 
 export type AuthResponse =
@@ -160,6 +175,12 @@ export type AuthResponse =
       success: false;
       error: string;
       status: number;
+      // When true, send the agent OAuth-discovery WWW-Authenticate header even on
+      // non-401 responses (e.g. keyless cap 429s) so agents can find the key flow.
+      agentAuthDiscovery?: boolean;
+      // Machine-readable keyless quota details for trusted MCP recovery.
+      keylessReason?: "requests" | "credits";
+      retryAfterSeconds?: number;
     };
 
 export enum NotificationType {

@@ -26,22 +26,26 @@ import { getErrorContactMessage } from "../../lib/deployment";
 import { captureExceptionWithZdrCheck } from "../../services/sentry";
 import type { BillingMetadata } from "../../services/billing/types";
 import { getScrapeZDR } from "../../lib/zdr-helpers";
+import {
+  adjustKeylessCredits,
+  keylessLimitBody,
+  logKeylessCreditUsage,
+  reserveKeylessCredits,
+} from "../../lib/keyless";
+import { projectScrapeCredits } from "../../lib/keyless-credit-projection";
+import { applyAgentAuthDiscoveryHeader } from "../../lib/agent-auth-discovery";
+import { getEffectiveConcurrencyLimit } from "../../lib/concurrency-limit";
 import path from "node:path";
+import {
+  DOCUMENT_EXTENSIONS,
+  documentExtensionFromContentType,
+} from "../../lib/document-formats";
 
 const AGENT_INTEROP_CONCURRENCY_BOOST = 3;
-const SUPPORTED_PARSE_FILE_TYPES =
-  ".html, .htm, .pdf, .docx, .doc, .odt, .rtf, .xlsx, .xls";
+export const SUPPORTED_PARSE_FILE_TYPES =
+  ".html, .htm, .xhtml, .pdf, .docx, .doc, .docm, .odt, .ods, .odp, .rtf, .xlsx, .xls, .xlsm, .xlsb, .pptx, .ppt, .pptm, .epub, .csv";
 
-const DOCUMENT_EXTENSIONS = new Set([
-  ".docx",
-  ".doc",
-  ".odt",
-  ".rtf",
-  ".xlsx",
-  ".xls",
-]);
-
-function detectUploadedFileKind(
+export function detectUploadedFileKind(
   filename: string,
   contentType?: string | null,
 ): UploadedParseFileKind | null {
@@ -59,17 +63,7 @@ function detectUploadedFileKind(
 
   const isDocument =
     DOCUMENT_EXTENSIONS.has(extension) ||
-    normalizedType.includes(
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ) ||
-    normalizedType.includes("application/vnd.ms-excel") ||
-    normalizedType.includes(
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ) ||
-    normalizedType.includes("application/msword") ||
-    normalizedType.includes("application/vnd.oasis.opendocument.text") ||
-    normalizedType.includes("application/rtf") ||
-    normalizedType.includes("text/rtf");
+    documentExtensionFromContentType(normalizedType) !== null;
 
   if (isDocument) {
     return "document";
@@ -348,6 +342,33 @@ export async function parseController(
       const agentRequestId = req.body.__agentInterop?.requestId ?? null;
       const boostConcurrency =
         req.body.__agentInterop?.boostConcurrency ?? false;
+      const isDirectToBullMQ =
+        config.SEARCH_PREVIEW_TOKEN !== undefined &&
+        config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
+      const projectedKeylessCredits =
+        shouldBill && !isDirectToBullMQ
+          ? projectScrapeCredits(
+              req.body,
+              req.acuc?.flags ?? null,
+              zeroDataRetention,
+            )
+          : 0;
+      let reservedKeylessCredits = 0;
+      let reconciledKeylessCredits = false;
+
+      if (projectedKeylessCredits > 0) {
+        const reservation = await reserveKeylessCredits(
+          req.auth.team_id,
+          projectedKeylessCredits,
+        );
+        if (!reservation.ok) {
+          applyAgentAuthDiscoveryHeader(res);
+          return res
+            .status(429)
+            .json(await keylessLimitBody(req.auth.team_id, "v2_parse"));
+        }
+        reservedKeylessCredits = projectedKeylessCredits;
+      }
 
       const logger = _logger.child({
         method: "parseController",
@@ -394,10 +415,6 @@ export async function parseController(
       const origin = req.body.origin;
       const timeout = req.body.timeout;
 
-      const isDirectToBullMQ =
-        config.SEARCH_PREVIEW_TOKEN !== undefined &&
-        config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
-
       const totalWait = 0;
 
       let lockTime: number | null = null;
@@ -416,7 +433,10 @@ export async function parseController(
         }
         req.on("close", () => aborter.abort());
 
-        const baseConcurrency = req.acuc?.concurrency || 1;
+        const baseConcurrency = await getEffectiveConcurrencyLimit(
+          req.auth.team_id,
+          req.acuc?.org_id,
+        );
         const concurrency = boostConcurrency
           ? baseConcurrency * AGENT_INTEROP_CONCURRENCY_BOOST
           : baseConcurrency;
@@ -480,6 +500,8 @@ export async function parseController(
                       bypassBilling: isDirectToBullMQ || !shouldBill,
                       zeroDataRetention,
                       teamFlags: req.acuc?.flags ?? null,
+                      orgId: req.acuc?.org_id ?? null,
+                      teamConcurrency: baseConcurrency,
                       uploadedFile: file,
                       forceEngine,
                       isParse: true,
@@ -493,6 +515,7 @@ export async function parseController(
                     zeroDataRetention,
                     apiKeyId: req.acuc?.api_key_id ?? null,
                     concurrencyLimited: limited,
+                    keylessReserved: reservedKeylessCredits > 0,
                     requestId: agentRequestId ?? undefined,
                   },
                 };
@@ -511,6 +534,13 @@ export async function parseController(
           },
         );
       } catch (e) {
+        if (reservedKeylessCredits > 0 && !reconciledKeylessCredits) {
+          reconciledKeylessCredits = true;
+          adjustKeylessCredits(req.auth.team_id, -reservedKeylessCredits).catch(
+            () => {},
+          );
+        }
+
         const timeoutErr =
           e instanceof TransportableError && e.code === "SCRAPE_TIMEOUT";
 
@@ -615,6 +645,18 @@ export async function parseController(
         }
       }
 
+      if (reservedKeylessCredits > 0 && !reconciledKeylessCredits) {
+        reconciledKeylessCredits = true;
+        const actualKeylessCredits = doc?.metadata?.creditsUsed ?? 0;
+        adjustKeylessCredits(
+          req.auth.team_id,
+          actualKeylessCredits - reservedKeylessCredits,
+        ).catch(() => {});
+        logKeylessCreditUsage(req.auth.team_id, actualKeylessCredits).catch(
+          () => {},
+        );
+      }
+
       const totalRequestTime = new Date().getTime() - middlewareStartTime;
       const controllerTime = new Date().getTime() - controllerStartTime;
 
@@ -632,6 +674,8 @@ export async function parseController(
       let usedLlm =
         !!hasFormatOfType(req.body.formats, "json") ||
         !!hasFormatOfType(req.body.formats, "summary") ||
+        !!hasFormatOfType(req.body.formats, "question") ||
+        !!hasFormatOfType(req.body.formats, "highlights") ||
         !!hasFormatOfType(req.body.formats, "query");
 
       if (!usedLlm) {

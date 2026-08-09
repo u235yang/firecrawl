@@ -1,12 +1,13 @@
 import { ScrapeActionContent } from "../../../lib/entities";
 import { config } from "../../../config";
-import { Meta } from "..";
+import type { BrowserCookie, Meta } from "..";
 import { documentMaxReasonableTime, scrapeDocument } from "./document";
 import {
   fireEngineMaxReasonableTime,
   scrapeURLWithFireEngineChromeCDP,
   scrapeURLWithFireEngineTLSClient,
 } from "./fire-engine";
+import { exchangeMaxReasonableTime, scrapeURLWithExchange } from "./exchange";
 import { pdfMaxReasonableTime, scrapePDF } from "./pdf";
 import { fetchMaxReasonableTime, scrapeURLWithFetch } from "./fetch";
 import {
@@ -19,14 +20,28 @@ import {
   wikipediaMaxReasonableTime,
   isWikimediaUrl,
 } from "./wikipedia";
+import {
+  scrapeURLWithXTwitter,
+  xTwitterMaxReasonableTime,
+  isXTwitterUrl,
+} from "./x-twitter";
 import { queryEngpickerVerdict, useIndex } from "../../../services";
 import { hasFormatOfType } from "../../../lib/format-utils";
-import { getPDFMaxPages } from "../../../controllers/v2/types";
+import {
+  getPDFMaxPages,
+  getPDFPageMarkdown,
+} from "../../../controllers/v2/types";
 import type { PdfMetadata } from "./pdf/types";
 import { BrandingProfile } from "../../../types/branding";
 import { BrandingNotSupportedError } from "../error";
+import { isUrlBlocked } from "../../WebScraper/utils/blocklist";
+import {
+  canUseExchangeForRequest,
+  type ExchangeScrapeMetadata,
+} from "../../../lib/exchange";
 
 export type Engine =
+  | "exchange"
   | "fire-engine;chrome-cdp"
   | "fire-engine(retry);chrome-cdp"
   | "fire-engine;chrome-cdp;stealth"
@@ -39,7 +54,8 @@ export type Engine =
   | "document"
   | "index"
   | "index;documents"
-  | "wikipedia";
+  | "wikipedia"
+  | "x-twitter";
 
 const useFireEngine =
   config.FIRE_ENGINE_BETA_URL !== "" &&
@@ -52,8 +68,12 @@ const useWikipedia =
   config.WIKIPEDIA_ENTERPRISE_USERNAME !== "" &&
   config.WIKIPEDIA_ENTERPRISE_PASSWORD !== undefined &&
   config.WIKIPEDIA_ENTERPRISE_PASSWORD !== "";
+const useXTwitter =
+  (config.XAI_API_KEY !== undefined && config.XAI_API_KEY !== "") ||
+  config.USE_DB_AUTHENTICATION === true;
 
 const engines: Engine[] = [
+  ...(useXTwitter ? ["x-twitter" as const] : []),
   ...(useWikipedia ? ["wikipedia" as const] : []),
   ...(useIndex ? ["index" as const, "index;documents" as const] : []),
   ...(useFireEngine
@@ -80,6 +100,7 @@ const featureFlags = [
   "pdf",
   "document",
   "audio",
+  "video",
   "atsv",
   "location",
   "mobile",
@@ -104,6 +125,7 @@ const featureFlagOptions: {
   pdf: { priority: 100 },
   document: { priority: 100 },
   audio: { priority: 100 },
+  video: { priority: 100 },
   atsv: { priority: 90 }, // NOTE: should atsv force to tlsclient? adjust priority if not
   useFastMode: { priority: 90 },
   location: { priority: 10 },
@@ -119,6 +141,8 @@ export type EngineScrapeResult = {
 
   html: string;
   markdown?: string;
+  pages?: Array<{ pageNumber: number; markdown: string }>;
+  json?: unknown;
   statusCode: number;
   error?: string;
 
@@ -145,14 +169,17 @@ export type EngineScrapeResult = {
 
   youtubeTranscriptContent?: any;
   postprocessorsUsed?: string[];
+  audioCookies?: BrowserCookie[];
 
   proxyUsed: "basic" | "stealth";
   timezone?: string;
+  exchange?: ExchangeScrapeMetadata;
 };
 
 const engineHandlers: {
   [E in Engine]: (meta: Meta) => Promise<EngineScrapeResult>;
 } = {
+  exchange: scrapeURLWithExchange,
   index: scrapeURLWithIndex,
   "index;documents": scrapeURLWithIndex,
   "fire-engine;chrome-cdp": scrapeURLWithFireEngineChromeCDP,
@@ -166,11 +193,13 @@ const engineHandlers: {
   pdf: scrapePDF,
   document: scrapeDocument,
   wikipedia: scrapeURLWithWikipedia,
+  "x-twitter": scrapeURLWithXTwitter,
 };
 
 const engineMRTs: {
   [E in Engine]: (meta: Meta) => number;
 } = {
+  exchange: exchangeMaxReasonableTime,
   index: indexMaxReasonableTime,
   "index;documents": indexMaxReasonableTime,
   "fire-engine;chrome-cdp": meta =>
@@ -190,6 +219,7 @@ const engineMRTs: {
   pdf: pdfMaxReasonableTime,
   document: documentMaxReasonableTime,
   wikipedia: wikipediaMaxReasonableTime,
+  "x-twitter": xTwitterMaxReasonableTime,
 };
 
 const engineOptions: {
@@ -202,6 +232,27 @@ const engineOptions: {
     quality: number;
   };
 } = {
+  exchange: {
+    features: {
+      actions: false,
+      waitFor: false,
+      screenshot: false,
+      "screenshot@fullScreen": false,
+      pdf: false,
+      document: false,
+      audio: false,
+      video: false,
+      atsv: false,
+      location: false,
+      mobile: false,
+      skipTlsVerification: true,
+      useFastMode: true,
+      stealthProxy: false,
+      branding: false,
+      disableAdblock: false,
+    },
+    quality: 2000,
+  },
   index: {
     features: {
       actions: false,
@@ -210,7 +261,8 @@ const engineOptions: {
       "screenshot@fullScreen": true,
       pdf: false,
       document: false,
-      audio: true,
+      audio: false,
+      video: false,
       atsv: false,
       mobile: true,
       location: true,
@@ -230,7 +282,8 @@ const engineOptions: {
       "screenshot@fullScreen": true, // through actions transform
       pdf: false,
       document: false,
-      audio: false,
+      audio: true,
+      video: true,
       atsv: false,
       location: true,
       mobile: true,
@@ -250,7 +303,8 @@ const engineOptions: {
       "screenshot@fullScreen": true, // through actions transform
       pdf: false,
       document: false,
-      audio: false,
+      audio: true,
+      video: true,
       atsv: false,
       location: true,
       mobile: true,
@@ -270,7 +324,8 @@ const engineOptions: {
       "screenshot@fullScreen": true,
       pdf: true,
       document: true,
-      audio: true,
+      audio: false,
+      video: false,
       atsv: false,
       location: true,
       mobile: true,
@@ -290,7 +345,8 @@ const engineOptions: {
       "screenshot@fullScreen": true, // through actions transform
       pdf: false,
       document: false,
-      audio: false,
+      audio: true,
+      video: true,
       atsv: false,
       location: true,
       mobile: true,
@@ -310,7 +366,8 @@ const engineOptions: {
       "screenshot@fullScreen": true, // through actions transform
       pdf: false,
       document: false,
-      audio: false,
+      audio: true,
+      video: true,
       atsv: false,
       location: true,
       mobile: true,
@@ -331,6 +388,7 @@ const engineOptions: {
       pdf: false,
       document: false,
       audio: false,
+      video: false,
       atsv: false,
       location: false,
       mobile: false,
@@ -351,6 +409,7 @@ const engineOptions: {
       pdf: false,
       document: false,
       audio: true,
+      video: true,
       atsv: true,
       location: true,
       mobile: false,
@@ -371,6 +430,7 @@ const engineOptions: {
       pdf: false,
       document: false,
       audio: true,
+      video: true,
       atsv: true,
       location: true,
       mobile: false,
@@ -391,6 +451,7 @@ const engineOptions: {
       pdf: false,
       document: false,
       audio: false,
+      video: false,
       atsv: false,
       location: false,
       mobile: false,
@@ -411,6 +472,7 @@ const engineOptions: {
       pdf: true,
       document: false,
       audio: false,
+      video: false,
       atsv: false,
       location: false,
       mobile: false,
@@ -431,6 +493,7 @@ const engineOptions: {
       pdf: false,
       document: true,
       audio: false,
+      video: false,
       atsv: false,
       location: false,
       mobile: false,
@@ -451,6 +514,7 @@ const engineOptions: {
       pdf: false,
       document: false,
       audio: false,
+      video: false,
       atsv: false,
       location: false,
       mobile: false,
@@ -461,6 +525,27 @@ const engineOptions: {
       disableAdblock: true,
     },
     quality: 500, // below index (1000) so cache is tried first, above fire-engine (50)
+  },
+  "x-twitter": {
+    features: {
+      actions: false,
+      waitFor: false,
+      screenshot: false,
+      "screenshot@fullScreen": false,
+      pdf: false,
+      document: false,
+      audio: false,
+      video: false,
+      atsv: false,
+      location: false,
+      mobile: false,
+      skipTlsVerification: true,
+      useFastMode: true,
+      stealthProxy: false,
+      branding: false,
+      disableAdblock: true,
+    },
+    quality: 1500,
   },
 };
 
@@ -482,6 +567,8 @@ export function shouldUseIndex(meta: Meta) {
     !hasFormatOfType(meta.options.formats, "branding") &&
     // Skip index if a non-default PDF maxPages is specified
     getPDFMaxPages(meta.options.parsers) === undefined &&
+    // The URL index does not yet persist physical-page capability metadata.
+    !getPDFPageMarkdown(meta.options.parsers) &&
     !hasCustomScreenshotSettings &&
     meta.options.maxAge !== 0 &&
     (meta.options.headers === undefined ||
@@ -497,6 +584,73 @@ export async function buildFallbackList(meta: Meta): Promise<
     unsupportedFeatures: Set<FeatureFlag>;
   }[]
 > {
+  if (
+    !meta.internalOptions.agentIndexOnly &&
+    meta.internalOptions.forceEngine === undefined
+  ) {
+    if (
+      await canUseExchangeForRequest({
+        url: meta.rewrittenUrl ?? meta.url,
+        formats: meta.options.formats,
+        actions: meta.options.actions,
+        headers: meta.options.headers,
+        waitFor: meta.options.waitFor,
+        mobile: meta.options.mobile,
+        location: meta.options.location,
+        proxy: meta.options.proxy,
+        blockAds: meta.options.blockAds,
+        profile: meta.options.profile,
+        atsv: meta.internalOptions.atsv,
+        minAge: meta.options.minAge,
+        includeTags: meta.options.includeTags,
+        excludeTags: meta.options.excludeTags,
+        zeroDataRetention: meta.internalOptions.zeroDataRetention,
+        lockdown: meta.options.lockdown,
+        flags: meta.internalOptions.teamFlags ?? null,
+      })
+    ) {
+      return [
+        {
+          engine: "exchange",
+          unsupportedFeatures: new Set(),
+        },
+      ];
+    }
+
+    // A blocked URL can only have been admitted by the Exchange bypass in
+    // blocklistMiddleware, which only applies to flagged orgs; if the
+    // Exchange is no longer usable by execution time (catalog changed,
+    // service down), fail closed rather than letting normal engines scrape
+    // a blocklisted site. An error here also fails closed: this branch only
+    // runs for flagged orgs, and a retryable scrape failure is preferable
+    // to scraping a potentially blocklisted site with normal engines.
+    if (
+      meta.internalOptions.teamFlags?.professionalProfileCompanyDataBeta ===
+      true
+    ) {
+      try {
+        if (
+          isUrlBlocked(
+            meta.rewrittenUrl ?? meta.url,
+            meta.internalOptions.teamFlags ?? null,
+            {
+              team_id: meta.internalOptions.teamId ?? null,
+              org_id: meta.internalOptions.orgId ?? null,
+              origin: null,
+            },
+          )
+        ) {
+          return [];
+        }
+      } catch (error) {
+        meta.logger.warn("Exchange blocklist re-check failed; failing closed", {
+          error,
+        });
+        return [];
+      }
+    }
+  }
+
   const shouldPrioritizeTlsClient = meta.options.__experimental_engpicker
     ? (await queryEngpickerVerdict(
         meta.options.__experimental_omceDomain ?? new URL(meta.url).hostname,
@@ -540,10 +694,57 @@ export async function buildFallbackList(meta: Meta): Promise<
     }
   }
 
+  // When fire-engine is available, drop tlsclient and fetch from the general
+  // waterfall: once chrome-cdp (and its retry) fail, degrading to a plain
+  // HTTP client tends to produce bot-walled or otherwise low-quality content,
+  // so we'd rather fail the scrape outright. They stay reachable when the
+  // request asks for them: fastMode/atsv set feature flags that chrome-cdp
+  // can't satisfy (and are handled here), audio/video keep tlsclient as the
+  // avgrab fallback behind chrome-cdp, and forceEngine bypasses _engines
+  // entirely, reading straight from internalOptions.
+  if (
+    useFireEngine &&
+    !meta.featureFlags.has("useFastMode") &&
+    !meta.featureFlags.has("atsv") &&
+    !meta.featureFlags.has("audio") &&
+    !meta.featureFlags.has("video")
+  ) {
+    // The sort-time quality boost below cannot resurrect an engine that was
+    // spliced out here, so dropping tlsclient unconditionally would silently
+    // neuter the engpicker opt-in on exactly the TlsClientOk domains where
+    // engpicker measured its output to match chrome-cdp's. Keep both variants
+    // when that verdict is in hand; regular scrapes never set the flag, so they
+    // drop tlsclient as intended.
+    const enginesToDrop: Engine[] = ["fetch"];
+    if (!shouldPrioritizeTlsClient) {
+      enginesToDrop.push(
+        "fire-engine;tlsclient",
+        "fire-engine;tlsclient;stealth",
+      );
+    }
+
+    for (const engine of enginesToDrop) {
+      const index = _engines.indexOf(engine);
+      if (index !== -1) {
+        _engines.splice(index, 1);
+      }
+    }
+  }
+
   if (!isWikimediaUrl(meta.url) || Math.random() >= 0.5) {
     const wikiIndex = _engines.indexOf("wikipedia");
     if (wikiIndex !== -1) {
       _engines.splice(wikiIndex, 1);
+    }
+  }
+
+  if (isXTwitterUrl(meta.url) && _engines.includes("x-twitter")) {
+    _engines.length = 0;
+    _engines.push("x-twitter");
+  } else if (!isXTwitterUrl(meta.url)) {
+    const xTwitterIndex = _engines.indexOf("x-twitter");
+    if (xTwitterIndex !== -1) {
+      _engines.splice(xTwitterIndex, 1);
     }
   }
 
@@ -587,6 +788,22 @@ export async function buildFallbackList(meta: Meta): Promise<
 
     if (supportScore >= priorityThreshold) {
       selectedEngines.push({ engine, supportScore, unsupportedFeatures });
+    }
+  }
+
+  // When stealth proxy is explicitly requested (proxy: "stealth" | "enhanced"),
+  // restrict the fallback list to engines that actually support it. Stealth
+  // engines all carry negative quality, so without this the quality filter
+  // below would drop them in favor of a regular positive-quality engine,
+  // silently ignoring the user's request and never attempting stealth.
+  // The guard keeps the original list if no stealth-capable engine qualified
+  // (e.g. self-hosted without fire-engine) so scrapes don't break entirely.
+  if (meta.featureFlags.has("stealthProxy")) {
+    const stealthCapable = selectedEngines.filter(
+      x => !x.unsupportedFeatures.has("stealthProxy"),
+    );
+    if (stealthCapable.length > 0) {
+      selectedEngines = stealthCapable;
     }
   }
 

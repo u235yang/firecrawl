@@ -107,6 +107,8 @@ describe("Scrape browser interact replay", () => {
         expect(executeResponse.statusCode).toBe(200);
         expect(executeResponse.body.success).toBe(true);
         expect(executeResponse.body.stdout).toContain(marker);
+        expect(typeof executeResponse.body.cdpUrl).toBe("string");
+        expect(executeResponse.body.cdpUrl.length).toBeGreaterThan(0);
       } finally {
         if (scrapeId) {
           await scrapeStopInteractiveBrowserRaw(scrapeId, identity);
@@ -189,6 +191,63 @@ describe("Scrape browser interact replay", () => {
     scrapeTimeout,
   );
 
+  itIf(canRunReplayHappyPath)(
+    "opens a single content tab (no stray blank tab) when a session starts",
+    async () => {
+      const url = `${TEST_SUITE_WEBSITE}?testId=${crypto.randomUUID()}`;
+      let scrapeId: string | null = null;
+
+      try {
+        const scrapeResponse = await scrapeRaw(
+          {
+            url,
+            origin: "website-replay-test",
+          },
+          identity,
+        );
+
+        expect(scrapeResponse.statusCode).toBe(200);
+        expect(scrapeResponse.body.success).toBe(true);
+        expect(typeof scrapeResponse.body.scrape_id).toBe("string");
+        scrapeId = scrapeResponse.body.scrape_id as string;
+
+        // Session creation primes agent-browser and consolidates tabs, so
+        // user code must see exactly one tab: the content page.
+        const executeResponse = await interactWithReplicaRetry(
+          scrapeId,
+          {
+            language: "node",
+            timeout: 60,
+            code: `
+              console.log(JSON.stringify(page.context().pages().map(p => p.url())));
+            `,
+          },
+          identity,
+        );
+
+        expect(executeResponse.statusCode).toBe(200);
+        expect(executeResponse.body.success).toBe(true);
+
+        const lastLine =
+          executeResponse.body.stdout
+            ?.trim()
+            .split("\n")
+            .filter(Boolean)
+            .pop() ?? "[]";
+        const tabUrls = JSON.parse(lastLine) as string[];
+
+        expect(tabUrls).toHaveLength(1);
+        expect(tabUrls[0]).not.toBe("about:blank");
+        expect(tabUrls[0]).toContain(TEST_SUITE_WEBSITE);
+      } finally {
+        if (scrapeId) {
+          await scrapeStopInteractiveBrowserRaw(scrapeId, identity);
+        }
+      }
+    },
+    scrapeTimeout,
+  );
+
   itIf(!TEST_SELF_HOST)(
     "returns 400 for invalid scrape job id format",
     async () => {
@@ -230,6 +289,10 @@ describe("Scrape browser interact replay", () => {
   itIf(ALLOW_TEST_SUITE_WEBSITE && !!config.IDMUX_URL)(
     "returns 403 when scrape job belongs to another team",
     async () => {
+      if (identity.teamId === otherIdentity.teamId) {
+        return;
+      }
+
       const scrapeResponse = await scrapeRaw(
         {
           url: `${TEST_SUITE_WEBSITE}?testId=${crypto.randomUUID()}`,

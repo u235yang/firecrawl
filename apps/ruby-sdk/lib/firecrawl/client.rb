@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "uri"
 
 module Firecrawl
   # Client for the Firecrawl v2 API.
@@ -38,9 +39,10 @@ module Firecrawl
       backoff_factor: DEFAULT_BACKOFF_FACTOR
     )
       resolved_key = api_key || ENV["FIRECRAWL_API_KEY"]
-      if resolved_key.nil? || resolved_key.strip.empty?
-        raise FirecrawlError, "API key is required. Provide api_key: or set FIRECRAWL_API_KEY environment variable."
-      end
+      # A nil/empty key is allowed: scrape, search, and interact fall back to the
+      # keyless free tier (rate-limited per IP). Other methods return 401 from the
+      # API until a key is provided.
+      resolved_key = nil if resolved_key.nil? || resolved_key.strip.empty?
 
       resolved_url = api_url || ENV["FIRECRAWL_API_URL"] || DEFAULT_API_URL
       unless resolved_url.match?(%r{\Ahttps?://}i)
@@ -77,9 +79,61 @@ module Firecrawl
 
       body = { "url" => url }
       body.merge!(options.to_h) if options
+      body["origin"] ||= "ruby-sdk@#{Firecrawl::VERSION}"
       raw = @http.post("/v2/scrape", body)
       data = raw["data"] || raw
       Models::Document.new(data)
+    end
+
+    # Search research papers.
+    #
+    # @param query [String] research query
+    # @param options [Hash] optional query parameters
+    # @return [Hash]
+    def search_papers(query, options = {})
+      @http.get("/v2/search/research/papers#{query(options.merge("query" => query, "origin" => "ruby-sdk@#{Firecrawl::VERSION}"))}")
+    end
+
+    # Inspect paper metadata.
+    #
+    # @param paper_id [String] paper identifier
+    # @return [Hash]
+    def inspect_paper(paper_id)
+      raise ArgumentError, "Paper ID is required" if paper_id.nil?
+      @http.get("/v2/search/research/papers/#{URI.encode_www_form_component(paper_id)}")
+    end
+
+    # Read a paper with query-guided passages.
+    #
+    # @param paper_id [String] paper identifier
+    # @param query_text [String] passage query
+    # @param options [Hash] optional query parameters
+    # @return [Hash]
+    def read_paper(paper_id, query_text, options = {})
+      raise ArgumentError, "Paper ID is required" if paper_id.nil?
+      path = "/v2/search/research/papers/#{URI.encode_www_form_component(paper_id)}"
+      @http.get("#{path}#{query(options.merge("query" => query_text, "origin" => "ruby-sdk@#{Firecrawl::VERSION}"))}")
+    end
+
+    # Find papers related to a paper.
+    #
+    # @param paper_id [String] paper identifier
+    # @param intent [String] relatedness intent
+    # @param options [Hash] optional query parameters
+    # @return [Hash]
+    def related_papers(paper_id, intent, options = {})
+      raise ArgumentError, "Paper ID is required" if paper_id.nil?
+      path = "/v2/search/research/papers/#{URI.encode_www_form_component(paper_id)}/similar"
+      @http.get("#{path}#{query(options.merge("intent" => intent, "origin" => "ruby-sdk@#{Firecrawl::VERSION}"))}")
+    end
+
+    # Search GitHub research content.
+    #
+    # @param query_text [String] GitHub query
+    # @param options [Hash] optional query parameters
+    # @return [Hash]
+    def search_github(query_text, options = {})
+      @http.get("/v2/search/research/github#{query(options.merge("query" => query_text, "origin" => "ruby-sdk@#{Firecrawl::VERSION}"))}")
     end
 
     # Interacts with the scrape-bound browser session for a scrape job.
@@ -95,6 +149,7 @@ module Firecrawl
 
       body = { "code" => code, "language" => language }
       body["timeout"] = timeout if timeout
+      body["origin"] ||= "ruby-sdk@#{Firecrawl::VERSION}"
       @http.post("/v2/scrape/#{job_id}/interact", body)
     end
 
@@ -281,6 +336,88 @@ module Firecrawl
     end
 
     # ================================================================
+    # MONITOR
+    # ================================================================
+
+    def create_monitor(name:, schedule:, targets:, webhook: nil, notification: nil,
+                       retention_days: nil, goal: nil, judge_enabled: nil)
+      body = {
+        "name" => name,
+        "schedule" => schedule,
+        "targets" => targets,
+        "webhook" => webhook,
+        "notification" => notification,
+        "retentionDays" => retention_days,
+        "goal" => goal,
+        "judgeEnabled" => judge_enabled,
+      }.compact
+      raw = @http.post("/v2/monitor", body)
+      Models::Monitor.new(raw["data"] || raw)
+    end
+
+    def list_monitors(limit: nil, offset: nil)
+      raw = @http.get("/v2/monitor#{query(limit: limit, offset: offset)}")
+      (raw["data"] || []).map { |item| Models::Monitor.new(item) }
+    end
+
+    def get_monitor(monitor_id)
+      raise ArgumentError, "Monitor ID is required" if monitor_id.nil?
+
+      raw = @http.get("/v2/monitor/#{monitor_id}")
+      Models::Monitor.new(raw["data"] || raw)
+    end
+
+    def update_monitor(monitor_id, **attrs)
+      raise ArgumentError, "Monitor ID is required" if monitor_id.nil?
+
+      body = {
+        "name" => attrs[:name],
+        "status" => attrs[:status],
+        "schedule" => attrs[:schedule],
+        "webhook" => attrs[:webhook],
+        "notification" => attrs[:notification],
+        "targets" => attrs[:targets],
+        "retentionDays" => attrs[:retention_days],
+        "goal" => attrs[:goal],
+        "judgeEnabled" => attrs[:judge_enabled],
+      }.compact
+      raw = @http.patch("/v2/monitor/#{monitor_id}", body)
+      Models::Monitor.new(raw["data"] || raw)
+    end
+
+    def delete_monitor(monitor_id)
+      raise ArgumentError, "Monitor ID is required" if monitor_id.nil?
+
+      @http.delete("/v2/monitor/#{monitor_id}")["success"] == true
+    end
+
+    def run_monitor(monitor_id)
+      raise ArgumentError, "Monitor ID is required" if monitor_id.nil?
+
+      raw = @http.post("/v2/monitor/#{monitor_id}/run", {})
+      Models::MonitorCheck.new(raw["data"] || raw)
+    end
+
+    def list_monitor_checks(monitor_id, limit: nil, offset: nil)
+      raise ArgumentError, "Monitor ID is required" if monitor_id.nil?
+
+      raw = @http.get("/v2/monitor/#{monitor_id}/checks#{query(limit: limit, offset: offset)}")
+      (raw["data"] || []).map { |item| Models::MonitorCheck.new(item) }
+    end
+
+    def get_monitor_check(monitor_id, check_id, limit: nil, skip: nil, status: nil, auto_paginate: true)
+      raise ArgumentError, "Monitor ID is required" if monitor_id.nil?
+      raise ArgumentError, "Check ID is required" if check_id.nil?
+
+      params = query(limit: limit, skip: skip, status: status)
+      raw = @http.get("/v2/monitor/#{monitor_id}/checks/#{check_id}#{params}")
+      data = raw["data"] || raw
+      data["next"] = raw["next"] if raw["next"]
+      check = Models::MonitorCheckDetail.new(data)
+      auto_paginate ? paginate_monitor_check(check) : check
+    end
+
+    # ================================================================
     # SEARCH
     # ================================================================
 
@@ -294,6 +431,7 @@ module Firecrawl
 
       body = { "query" => query }
       body.merge!(options.to_h) if options
+      body["origin"] ||= "ruby-sdk@#{Firecrawl::VERSION}"
       raw = @http.post("/v2/search", body)
       data = raw["data"] || raw
       Models::SearchData.new(data)
@@ -372,10 +510,28 @@ module Firecrawl
     # @return [Models::CreditUsage]
     def get_credit_usage
       raw = @http.get("/v2/team/credit-usage")
-      Models::CreditUsage.new(raw)
+      data = raw["data"] || raw
+      Models::CreditUsage.new(data)
     end
 
     private
+
+    def query(params = nil, **kwargs)
+      params = (params || {}).merge(kwargs)
+      pairs = []
+      params.each do |key, value|
+        next if value.nil? || value == ""
+
+        values = value.is_a?(Array) ? value : [value]
+        values.each do |item|
+          next if item.nil? || item == ""
+
+          string_value = item == true ? "true" : item == false ? "false" : item.to_s
+          pairs << [key.to_s, string_value]
+        end
+      end
+      pairs.empty? ? "" : "?#{URI.encode_www_form(pairs)}"
+    end
 
     def poll_crawl(job_id, poll_interval, timeout)
       deadline = Time.now + timeout
@@ -421,6 +577,21 @@ module Firecrawl
         current = next_page
       end
       job
+    end
+
+    def paginate_monitor_check(check)
+      check.pages ||= []
+      current = check
+      while current.next_url && !current.next_url.empty?
+        raw = @http.get_absolute(current.next_url)
+        data = raw["data"] || raw
+        data["next"] = raw["next"] if raw["next"]
+        next_page = Models::MonitorCheckDetail.new(data)
+        check.pages.concat(next_page.pages) unless next_page.pages.empty?
+        current = next_page
+      end
+      check.next_url = nil
+      check
     end
   end
 end

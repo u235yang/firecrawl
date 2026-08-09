@@ -3,12 +3,10 @@ import { config } from "../../../../config";
 import { robustFetch } from "../../lib/fetch";
 import { z } from "zod";
 import type { PDFProcessorResult } from "./types";
+import type { PDFMode } from "../../../../controllers/v2/types";
 import { safeMarkdownToHtml } from "./markdownToHtml";
-import {
-  createPdfCacheKey,
-  getPdfResultFromCache,
-  savePdfResultToCache,
-} from "../../../../lib/gcs-pdf-cache";
+import { createPdfCacheKey } from "../../../../lib/gcs-pdf-cache";
+import { maybeSaveResult, tryGetCached } from "./fire-pdf/cache";
 
 /**
  * Reconcile an existing page count with what fire-pdf reported.
@@ -45,28 +43,36 @@ export async function scrapePDFWithFirePDF(
   base64Content: string,
   maxPages?: number,
   pagesProcessed?: number,
+  mode?: PDFMode,
+  includePageMarkdown = false,
 ): Promise<PDFProcessorResult> {
   const logger = meta.logger;
 
-  if (!maxPages && !meta.internalOptions.zeroDataRetention) {
-    try {
-      const cached = await getPdfResultFromCache(base64Content, "firepdf");
-      if (cached) {
-        logger.info("Using cached FirePDF result", {
-          scrapeId: meta.id,
-        });
-        // Cache entries written before pagesProcessed existed don't carry
-        // the field. Fall back to the caller's pagesProcessed argument so
-        // billing on a stale hit doesn't silently regress to 0.
-        return {
-          ...cached,
-          pagesProcessed: cached.pagesProcessed ?? pagesProcessed,
-        };
-      }
-    } catch (error) {
-      logger.warn("Error checking FirePDF cache, proceeding", { error });
-    }
-  }
+  // Cache layout:
+  //   - `ocr` mode reads/writes a dedicated `…-ocr.json` bucket. ocr
+  //     requests explicitly want forced layout-mode OCR, so they must
+  //     not be served a base-cache entry that was written by `auto`.
+  //   - `auto` (and legacy undefined-mode) reads/writes the base
+  //     `firepdf-<sha>.json` bucket — same key main has always used,
+  //     so existing entries keep working. As a free upgrade, auto also
+  //     reads the ocr bucket as a fallback: if some prior `ocr` run
+  //     already produced markdown for this PDF, reuse it rather than
+  //     running fire-pdf again.
+  //   - `fast` is bypassed entirely (hard cost ceiling — must fail on
+  //     scanned PDFs, not serve a cached OCR result).
+  const cacheable =
+    mode !== "fast" && !maxPages && !meta.internalOptions.zeroDataRetention;
+  const cached = cacheable
+    ? await tryGetCached(
+        meta,
+        base64Content,
+        mode,
+        maxPages,
+        pagesProcessed,
+        includePageMarkdown,
+      )
+    : null;
+  if (cached) return cached;
 
   meta.abort.throwIfAborted();
 
@@ -112,6 +118,8 @@ export async function scrapePDFWithFirePDF(
       pdf: base64Content,
       scrape_id: meta.id,
       ...(maxPages !== undefined && { max_pages: maxPages }),
+      ...(mode !== undefined && { mode }),
+      ...(includePageMarkdown && { include_page_markdown: true }),
       // Enrichment for the fire-pdf jobs DB / dashboard. fire-pdf treats
       // these as optional — older fire-pdf builds will ignore unknown fields.
       team_id: meta.internalOptions.teamId,
@@ -129,12 +137,22 @@ export async function scrapePDFWithFirePDF(
       markdown: z.string(),
       failed_pages: z.array(z.number()).nullable(),
       pages_processed: z.number().optional(),
+      pages: z
+        .array(
+          z.object({ page: z.number().int().positive(), markdown: z.string() }),
+        )
+        .optional(),
     }),
     mock: meta.mock,
     abort: meta.abort.asSignal(),
   });
 
   const durationMs = Date.now() - startedAt;
+  if (includePageMarkdown && resp.pages === undefined) {
+    throw new Error(
+      "FirePDF response did not include requested physical page markdown",
+    );
+  }
   const pages = resp.pages_processed ?? pagesProcessed;
 
   logger.info("FirePDF completed", {
@@ -151,14 +169,18 @@ export async function scrapePDFWithFirePDF(
     markdown: resp.markdown,
     html: await safeMarkdownToHtml(resp.markdown, logger, meta.id),
     pagesProcessed: pages,
+    ...(resp.pages ? { pageMarkdown: resp.pages } : {}),
   };
 
-  if (!maxPages && !meta.internalOptions.zeroDataRetention) {
-    try {
-      await savePdfResultToCache(base64Content, processorResult, "firepdf");
-    } catch (error) {
-      logger.warn("Error saving FirePDF result to cache", { error });
-    }
+  if (cacheable) {
+    await maybeSaveResult({
+      meta,
+      base64Content,
+      mode,
+      maxPages,
+      includePageMarkdown,
+      result: processorResult,
+    });
   }
 
   return processorResult;

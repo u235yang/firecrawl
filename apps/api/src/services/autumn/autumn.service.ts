@@ -1,7 +1,8 @@
 import { randomUUID } from "crypto";
-import { config } from "../../config";
 import { logger } from "../../lib/logger";
-import { supabase_rr_service } from "../supabase";
+import { eq } from "drizzle-orm";
+import { dbRr } from "../../db/connection";
+import * as schema from "../../db/schema";
 import { autumnClient } from "./client";
 import type {
   CreateEntityParams,
@@ -12,82 +13,40 @@ import type {
   GetEntityParams,
   GetOrCreateCustomerParams,
   LockCreditsParams,
+  LockCreditsResult,
   TrackCreditsParams,
   TrackParams,
 } from "./types";
 
-const TEAM_FEATURE_ID = "TEAM";
-const CREDITS_FEATURE_ID = "CREDITS";
+export const TEAM_FEATURE_ID = "TEAM";
+export const CREDITS_FEATURE_ID = "CREDITS";
+export const SEARCH_CREDITS_FEATURE_ID = "SEARCH_CREDITS";
+const CONCURRENCY_FEATURE_ID = "CONCURRENCY";
+const RATE_LIMIT_FEATURE_ID = "rate_limits";
 
 /**
- * Org IDs that always have Autumn enabled, regardless of experiment
- * percentage or feature flags.
+ * Coerces a raw Autumn balance figure into a usable non-negative number, or
+ * null when it's absent or not a sane finite value. These balances feed
+ * directly into rate-limit and concurrency controls, so NaN, Infinity, and
+ * negatives are rejected rather than passed through a bare `typeof` check.
  */
-export const AUTUMN_BYPASS_ORG_IDS = new Set([
-  "318e9dfd-9d76-489d-86fa-64bcbc3682f9", // Autumn
-  "601f9bf3-425c-4309-97ae-4626842738d5", // Autumn
-  "5ee89794-c287-47c5-b621-cbfbc0dbaaff",
-  "0f2c26d2-e1f9-4a96-b443-7e93067fc3a9",
-  "8454ff9b-833f-42ee-bcdd-87457f687779",
-]);
-
-/**
- * Deterministic bucket for an org UUID.
- *
- * Takes the first 8 hex digits of the id (after stripping dashes) and maps
- * them to an integer in [0, 100).  The same orgId always lands in the same
- * bucket so the experiment decision is stable across requests.
- */
-export function orgBucket(orgId: string): number {
-  const hex = orgId.replace(/-/g, "").slice(0, 8);
-  return parseInt(hex, 16) % 100;
-}
-
-/**
- * Returns true when the Autumn experiment is active.
- *
- * Without an orgId the check is a simple on/off flag — useful as a fast
- * bail-out before the orgId is known.  When an orgId is supplied the
- * stable percent gate is also evaluated so the same org always gets the
- * same answer.
- *
- * Only checked at the top-level billing entry points (`lockCredits` and the
- * direct-track `trackCredits`).
- * NOT checked by `finalizeCreditsLock`, `refundCredits`, or
- * `ensureTeamProvisioned`.
- */
-export function isAutumnEnabled(orgId?: string): boolean {
-  if (orgId && AUTUMN_BYPASS_ORG_IDS.has(orgId)) return true;
-  if (config.AUTUMN_EXPERIMENT !== "true") return false;
-  if (!orgId || config.AUTUMN_EXPERIMENT_PERCENT >= 100) return true;
-  return orgBucket(orgId) < config.AUTUMN_EXPERIMENT_PERCENT;
-}
-
-export function isAutumnCheckEnabled(orgId?: string): boolean {
-  if (orgId && AUTUMN_BYPASS_ORG_IDS.has(orgId)) return true;
-  if (config.AUTUMN_CHECK_ENABLED !== "true") return false;
-  if (config.AUTUMN_EXPERIMENT !== "true") return false;
-  const percent = config.AUTUMN_CHECK_EXPERIMENT_PERCENT ?? 100;
-  if (!orgId || percent >= 100) return true;
-  return orgBucket(orgId) < percent;
-}
-
-/**
- * When true, Autumn check results are logged but never used to gate requests.
- * The legacy credit system remains authoritative.
- */
-export function isAutumnCheckDryRun(): boolean {
-  return config.AUTUMN_CHECK_DRY_RUN === "true";
-}
-
-export function isAutumnRequestTrackEnabled(orgId?: string): boolean {
-  if (orgId && AUTUMN_BYPASS_ORG_IDS.has(orgId)) return true;
-  if (config.AUTUMN_REQUEST_TRACK_EXPERIMENT !== "true") return false;
-  if (!isAutumnEnabled(orgId)) return false;
-  if (!orgId || config.AUTUMN_REQUEST_TRACK_EXPERIMENT_PERCENT >= 100) {
-    return true;
+function sanitizeBalanceValue(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return null;
   }
-  return orgBucket(orgId) < config.AUTUMN_REQUEST_TRACK_EXPERIMENT_PERCENT;
+  return value;
+}
+
+/**
+ * Maps a billing endpoint to the Autumn feature ID it should bill against.
+ *
+ * Search balance and usage are tracked against a dedicated SEARCH_CREDITS
+ * feature; everything else uses the general CREDITS feature. Scrapes performed
+ * as part of a search bill themselves under their own (non-search) endpoint, so
+ * they correctly remain on CREDITS.
+ */
+export function featureIdForBillingEndpoint(endpoint?: string): string {
+  return endpoint === "search" ? SEARCH_CREDITS_FEATURE_ID : CREDITS_FEATURE_ID;
 }
 
 const AUTUMN_DEFAULT_PLAN_ID = "free";
@@ -138,13 +97,12 @@ export class AutumnService {
   }
 
   private async lookupOrgIdForTeam(teamId: string): Promise<string> {
-    const { data, error } = await supabase_rr_service
-      .from("teams")
-      .select("org_id")
-      .eq("id", teamId)
-      .single();
+    const [data] = await dbRr
+      .select({ org_id: schema.teams.org_id })
+      .from(schema.teams)
+      .where(eq(schema.teams.id, teamId))
+      .limit(1);
 
-    if (error) throw error;
     if (!data?.org_id) {
       throw new Error(`Missing org_id for team ${teamId}`);
     }
@@ -266,6 +224,7 @@ export class AutumnService {
         featureId,
         value,
         properties,
+        overageBehavior: "overflow",
       });
       logger.info("Autumn track succeeded", {
         customerId,
@@ -391,6 +350,7 @@ export class AutumnService {
     teamId,
     value,
     properties,
+    featureId = CREDITS_FEATURE_ID,
   }: TrackCreditsParams): Promise<{
     allowed: boolean;
     remaining: number;
@@ -399,14 +359,11 @@ export class AutumnService {
       return null;
     }
     try {
-      const orgId = await this.resolveOrgId(teamId);
-      if (!isAutumnCheckEnabled(orgId)) return null;
-
       const customerId = await this.ensureTrackingContext(teamId);
       const { allowed, balance } = await autumnClient.check({
         customerId,
         entityId: teamId,
-        featureId: CREDITS_FEATURE_ID,
+        featureId,
         requiredBalance: value,
         properties,
       });
@@ -416,7 +373,7 @@ export class AutumnService {
       logger.debug("Autumn checkCredits completed", {
         customerId,
         entityId: teamId,
-        featureId: CREDITS_FEATURE_ID,
+        featureId,
         value,
         allowed,
         remaining,
@@ -436,8 +393,7 @@ export class AutumnService {
   }
 
   /**
-   * Reserves a team's credits in Autumn without letting Autumn gate usage.
-   * Returns the lock ID on success, or null if no lock was acquired.
+   * Attempts to reserve a team's credits in Autumn. See {@link LockCreditsResult}.
    */
   async lockCredits({
     teamId,
@@ -445,21 +401,19 @@ export class AutumnService {
     lockId,
     expiresAt,
     properties,
-  }: LockCreditsParams): Promise<string | null> {
+    featureId = CREDITS_FEATURE_ID,
+  }: LockCreditsParams): Promise<LockCreditsResult> {
     if (!autumnClient || this.isPreviewTeam(teamId)) {
-      return null;
+      return { status: "skipped" };
     }
     const resolvedLockId = lockId ?? `billing_${randomUUID()}`;
 
     try {
-      const orgId = await this.resolveOrgId(teamId);
-      if (!isAutumnEnabled(orgId)) return null;
-
       const customerId = await this.ensureTrackingContext(teamId);
       const { allowed } = await autumnClient.check({
         customerId,
         entityId: teamId,
-        featureId: CREDITS_FEATURE_ID,
+        featureId,
         requiredBalance: value,
         properties,
         lock: {
@@ -475,18 +429,18 @@ export class AutumnService {
           value,
           lockId: resolvedLockId,
         });
-        return null;
+        return { status: "denied" };
       }
 
       logger.info("Autumn lockCredits succeeded", {
         customerId,
         entityId: teamId,
-        featureId: CREDITS_FEATURE_ID,
+        featureId,
         value,
         lockId: resolvedLockId,
         properties,
       });
-      return resolvedLockId;
+      return { status: "locked", lockId: resolvedLockId };
     } catch (error) {
       logger.error(
         "Autumn lockCredits failed — billing API may be unavailable, falling back",
@@ -497,7 +451,7 @@ export class AutumnService {
           error,
         },
       );
-      return null;
+      return { status: "skipped" };
     }
   }
 
@@ -539,33 +493,22 @@ export class AutumnService {
 
   /**
    * Records a credit usage event directly in Autumn. Returns true on success.
-   *
-   * The experiment gate is evaluated here — once per request — using a stable
-   * bucket derived from the org UUID so the same org always gets the same
-   * answer for a given AUTUMN_EXPERIMENT_PERCENT value.
    */
   async trackCredits({
     teamId,
     value,
     properties,
-    requestScoped = false,
+    featureId = CREDITS_FEATURE_ID,
   }: TrackCreditsParams): Promise<boolean> {
-    const isEnabled = requestScoped
-      ? isAutumnRequestTrackEnabled
-      : isAutumnEnabled;
-    if (!isEnabled()) return false;
     if (!autumnClient) return false;
     if (this.isPreviewTeam(teamId)) return false;
 
     try {
-      const orgId = await this.resolveOrgId(teamId);
-      if (!isEnabled(orgId)) return false;
-
       const customerId = await this.ensureTrackingContext(teamId);
       return await this.track({
         customerId,
         entityId: teamId,
-        featureId: CREDITS_FEATURE_ID,
+        featureId,
         value,
         properties,
       });
@@ -575,12 +518,154 @@ export class AutumnService {
         {
           teamId,
           value,
-          requestScoped,
           error,
         },
       );
       return false;
     }
+  }
+
+  // Cache the team's entity-derived limits briefly so concurrency enforcement
+  // and rate-limit gating on every scrape/crawl/browser request don't fan out
+  // to Autumn each time. Both the CONCURRENCY limit and the rate-limit
+  // multiplier come from a single entity.get, so one cache entry (and one
+  // Autumn round-trip per team per TTL window) serves both callers.
+  private entityLimitsCache = new BoundedMap<
+    string,
+    {
+      concurrency: number | null;
+      rateLimitMultiplier: number | null;
+      expiresAt: number;
+    }
+  >(50_000);
+  private static readonly ENTITY_LIMITS_TTL_MS = 60_000;
+
+  // Fail-open fallbacks used ONLY when Autumn itself errors (network / 5xx /
+  // unexpected exception) so a billing-API outage doesn't throttle real
+  // customers down to the low defaults. A 404 or an absent balance is NOT an
+  // error — it legitimately means the team has no elevated entitlement, so
+  // those keep falling back low (concurrency 2, multiplier 1). These values are
+  // intentionally generous but bounded (the concurrency queue cap still
+  // applies).
+  private static readonly ERROR_FALLBACK_CONCURRENCY = 200;
+  private static readonly ERROR_FALLBACK_RATE_MULTIPLIER = 2500;
+
+  /**
+   * Fetches the team's Autumn entity once and derives both the CONCURRENCY
+   * limit and the rate-limit multiplier from it. Each team has its own Autumn
+   * entity, so the entity balances are per-team regardless of whether the org
+   * has one or many teams.
+   *
+   * Returns nulls when Autumn is not configured, the entity is missing (404),
+   * or a balance isn't present — these mean "no elevated entitlement", so
+   * callers fall back to the low defaults. When Autumn itself errors (network /
+   * 5xx / unexpected exception) we instead fail OPEN, returning the high
+   * ERROR_FALLBACK_* limits so a billing outage doesn't throttle real teams.
+   */
+  private async getEntityLimits(
+    teamId: string,
+    orgId?: string | null,
+  ): Promise<{
+    concurrency: number | null;
+    rateLimitMultiplier: number | null;
+  }> {
+    if (!autumnClient || this.isPreviewTeam(teamId)) {
+      return { concurrency: null, rateLimitMultiplier: null };
+    }
+
+    const now = Date.now();
+    const cached = this.entityLimitsCache.get(teamId);
+    if (cached && cached.expiresAt > now) {
+      return {
+        concurrency: cached.concurrency,
+        rateLimitMultiplier: cached.rateLimitMultiplier,
+      };
+    }
+
+    const store = (
+      concurrency: number | null,
+      rateLimitMultiplier: number | null,
+    ) => {
+      this.entityLimitsCache.set(teamId, {
+        concurrency,
+        rateLimitMultiplier,
+        expiresAt: now + AutumnService.ENTITY_LIMITS_TTL_MS,
+      });
+      return { concurrency, rateLimitMultiplier };
+    };
+
+    try {
+      const resolvedOrgId = orgId ?? (await this.resolveOrgId(teamId));
+      if (!resolvedOrgId)
+        return { concurrency: null, rateLimitMultiplier: null };
+
+      const entity: any = await autumnClient.entities.get({
+        customerId: resolvedOrgId,
+        entityId: teamId,
+      });
+      const balances = entity?.balances ?? {};
+
+      // CONCURRENCY: use `remaining` (the post-drain effective per-team cap;
+      // `granted` would surface the pre-drain inherited customer total).
+      const concurrency = sanitizeBalanceValue(
+        balances[CONCURRENCY_FEATURE_ID]?.remaining,
+      );
+
+      // rate_limits: a static per-plan multiplier that is never consumed, so
+      // read `granted` (the entitled amount) rather than `remaining`.
+      const rateLimitMultiplier = sanitizeBalanceValue(
+        balances[RATE_LIMIT_FEATURE_ID]?.granted,
+      );
+
+      return store(concurrency, rateLimitMultiplier);
+    } catch (error) {
+      const status = this.getErrorStatus(error);
+      // 404 = the entity genuinely doesn't exist in Autumn (not an error):
+      // fall back low, and cache it so we don't re-query for a team we know is
+      // absent.
+      if (status === 404) return store(null, null);
+      // Any other failure means we couldn't reach Autumn / it errored. Fail
+      // OPEN with high limits rather than throttling the team to the low
+      // defaults. Deliberately not cached, so we retry Autumn on the next
+      // request instead of pinning the team to the fallback for the TTL window.
+      logger.error(
+        "Autumn getEntityLimits failed — billing API may be unavailable, falling back to high limits",
+        { teamId, error },
+      );
+      return {
+        concurrency: AutumnService.ERROR_FALLBACK_CONCURRENCY,
+        rateLimitMultiplier: AutumnService.ERROR_FALLBACK_RATE_MULTIPLIER,
+      };
+    }
+  }
+
+  /**
+   * Reads the team's allowed concurrent-browser count from Autumn's
+   * entity-scoped CONCURRENCY balance. Returns null when the entity is missing
+   * or there's no balance — callers fall back to the low default via
+   * getEffectiveConcurrencyLimit. On an Autumn error it returns the high
+   * ERROR_FALLBACK_CONCURRENCY (fail open) rather than null.
+   */
+  async getConcurrencyLimit(
+    teamId: string,
+    orgId?: string | null,
+  ): Promise<number | null> {
+    return (await this.getEntityLimits(teamId, orgId)).concurrency;
+  }
+
+  /**
+   * Reads the team's rate-limit multiplier from Autumn's `rate_limits` feature.
+   * Effective rate limits are `base × multiplier`. Falls back to a multiplier of
+   * 1 when the feature is missing or the entity doesn't exist, so callers don't
+   * have to; on an Autumn error it fails open with the high
+   * ERROR_FALLBACK_RATE_MULTIPLIER instead. Shares a single cached entity fetch
+   * with getConcurrencyLimit, so it adds no Autumn call.
+   */
+  async getRateLimitMultiplier(
+    teamId: string,
+    orgId?: string | null,
+  ): Promise<number> {
+    return (await this.getEntityLimits(teamId, orgId)).rateLimitMultiplier ?? 1;
   }
 
   /**
@@ -590,6 +675,7 @@ export class AutumnService {
     teamId,
     value,
     properties,
+    featureId = CREDITS_FEATURE_ID,
   }: TrackCreditsParams): Promise<void> {
     if (!autumnClient) return;
     if (this.isPreviewTeam(teamId)) return;
@@ -599,7 +685,7 @@ export class AutumnService {
       await this.track({
         customerId,
         entityId: teamId,
-        featureId: CREDITS_FEATURE_ID,
+        featureId,
         value: -value,
         properties: { ...properties, source: "autumn_refund" },
       });

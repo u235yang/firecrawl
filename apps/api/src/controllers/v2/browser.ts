@@ -18,10 +18,11 @@ import {
   clearBrowserSessionPromptFlag,
 } from "../../lib/browser-sessions";
 import {
-  getConcurrencyLimitActiveJobsCount,
-  pushConcurrencyLimitActiveJob,
-  removeConcurrencyLimitActiveJob,
-} from "../../lib/concurrency-limit";
+  getCombinedTeamActiveCount,
+  mirrorExternalSlotAcquire,
+  mirrorExternalSlotRelease,
+} from "../../services/worker/nuq-router";
+import { getEffectiveConcurrencyLimit } from "../../lib/concurrency-limit";
 import { RequestWithAuth } from "./types";
 import { billTeam } from "../../services/billing/credit_billing";
 import { enqueueBrowserSessionActivity } from "../../lib/browser-session-activity";
@@ -42,6 +43,7 @@ const browserCreateRequestSchema = z.object({
   ttl: z.number().min(30).max(3600).default(600),
   activityTtl: z.number().min(10).max(3600).default(300),
   streamWebView: z.boolean().default(true),
+  recordSession: z.boolean().default(true),
   integration: integrationSchema.optional().transform(val => val || null),
   profile: z
     .object({
@@ -212,7 +214,14 @@ export async function browserCreateController(
 
   req.body = browserCreateRequestSchema.parse(req.body);
 
-  const { ttl, activityTtl, streamWebView, profile, integration } = req.body;
+  const {
+    ttl,
+    activityTtl,
+    streamWebView,
+    recordSession,
+    profile,
+    integration,
+  } = req.body;
 
   if (!config.BROWSER_SERVICE_URL) {
     return res.status(503).json({
@@ -229,7 +238,11 @@ export async function browserCreateController(
   const autumnResult = await autumnService.checkCredits({
     teamId: req.auth.team_id,
     value: estimatedCredits,
-    properties: { source: "browserCreate", path: req.path },
+    properties: {
+      source: "browserCreate",
+      path: req.path,
+      apiKeyId: req.acuc?.api_key_id ?? null,
+    },
   });
 
   if (autumnResult !== null && !autumnResult.allowed) {
@@ -244,10 +257,11 @@ export async function browserCreateController(
   }
 
   // 0b. Enforce concurrency limit (shared pool with scrape/crawl/interact)
-  const concurrencyLimit = req.acuc?.concurrency ?? 2;
-  const activeCount = await getConcurrencyLimitActiveJobsCount(
+  const concurrencyLimit = await getEffectiveConcurrencyLimit(
     req.auth.team_id,
+    req.acuc?.org_id,
   );
+  const activeCount = await getCombinedTeamActiveCount(req.auth.team_id);
   if (activeCount >= concurrencyLimit) {
     logger.warn("Concurrency limit reached for browser session", {
       activeCount,
@@ -284,6 +298,7 @@ export async function browserCreateController(
         "/browsers",
         {
           ttl,
+          record: recordSession,
           ...(activityTtl !== undefined ? { activityTtl } : {}),
           ...(persistentStorage !== undefined ? { persistentStorage } : {}),
         },
@@ -374,7 +389,7 @@ export async function browserCreateController(
 
   // Register in the shared concurrency limiter so this session counts
   // against the team's concurrent job limit while it's active.
-  pushConcurrencyLimitActiveJob(req.auth.team_id, sessionId, ttl * 1000).catch(
+  mirrorExternalSlotAcquire(req.auth.team_id, sessionId, ttl * 1000).catch(
     () => {},
   );
 
@@ -554,7 +569,7 @@ export async function browserDeleteController(
 
   // Invalidate cached count so next check reflects the destroyed session
   invalidateActiveBrowserSessionCount(session.team_id).catch(() => {});
-  removeConcurrencyLimitActiveJob(session.team_id, session.id).catch(error => {
+  mirrorExternalSlotRelease(session.team_id, session.id).catch(error => {
     logger.error(
       "Failed to remove concurrency limiter entry for browser session",
       {
@@ -597,13 +612,10 @@ export async function browserDeleteController(
     });
   });
 
-  billTeam(
-    req.auth.team_id,
-    req.acuc?.sub_id ?? undefined,
-    creditsBilled,
-    req.acuc?.api_key_id ?? null,
-    { endpoint: usedPrompt ? "interact" : "browser", jobId: session.id },
-  ).catch(error => {
+  billTeam(req.auth.team_id, creditsBilled, req.acuc?.api_key_id ?? null, {
+    endpoint: usedPrompt ? "interact" : "browser",
+    jobId: session.id,
+  }).catch(error => {
     logger.error("Failed to bill team for browser session", {
       error,
       creditsBilled,
@@ -701,7 +713,7 @@ export async function browserWebhookDestroyedController(
   const claimed = await claimBrowserSessionDestroyed(session.id);
 
   invalidateActiveBrowserSessionCount(session.team_id).catch(() => {});
-  removeConcurrencyLimitActiveJob(session.team_id, session.id).catch(error => {
+  mirrorExternalSlotRelease(session.team_id, session.id).catch(error => {
     logger.error(
       "Failed to remove concurrency limiter entry for browser session via webhook",
       {
@@ -743,7 +755,6 @@ export async function browserWebhookDestroyedController(
 
   billTeam(
     session.team_id,
-    undefined, // subscription_id — billTeam will look it up
     creditsBilled,
     null, // api_key_id not available in webhook context
     { endpoint: usedPrompt ? "interact" : "browser", jobId: session.id },

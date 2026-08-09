@@ -49,6 +49,12 @@ func (h *httpClient) post(ctx context.Context, path string, body interface{}, ex
 	return h.doJSON(ctx, "POST", url, body, extraHeaders)
 }
 
+// patch sends a PATCH request.
+func (h *httpClient) patch(ctx context.Context, path string, body interface{}) (json.RawMessage, error) {
+	url := h.baseURL + path
+	return h.doJSON(ctx, "PATCH", url, body, nil)
+}
+
 // get sends a GET request.
 func (h *httpClient) get(ctx context.Context, path string) (json.RawMessage, error) {
 	url := h.baseURL + path
@@ -130,7 +136,9 @@ func (h *httpClient) postMultipart(
 			return nil, &FirecrawlError{Message: fmt.Sprintf("failed to create request: %v", err)}
 		}
 
-		req.Header.Set("Authorization", "Bearer "+h.apiKey)
+		if h.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+h.apiKey)
+		}
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("User-Agent", "firecrawl-go/"+Version)
 		for k, v := range h.extraHeaders {
@@ -215,7 +223,9 @@ func (h *httpClient) doJSON(ctx context.Context, method, url string, body interf
 			return nil, &FirecrawlError{Message: fmt.Sprintf("failed to create request: %v", err)}
 		}
 
-		req.Header.Set("Authorization", "Bearer "+h.apiKey)
+		if h.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+h.apiKey)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "firecrawl-go/"+Version)
 		// Apply client-level headers.

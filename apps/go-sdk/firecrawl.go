@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ import (
 )
 
 const (
-	defaultPollInterval = 2  // seconds
+	defaultPollInterval = 2   // seconds
 	defaultJobTimeout   = 300 // seconds
 )
 
@@ -55,12 +56,9 @@ func NewClient(opts ...option.RequestOption) (*Client, error) {
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(os.Getenv("FIRECRAWL_API_KEY"))
 	}
-	if apiKey == "" {
-		return nil, &FirecrawlError{
-			Message: "API key is required. Set it via option.WithAPIKey(), " +
-				"or FIRECRAWL_API_KEY environment variable.",
-		}
-	}
+	// An empty API key is allowed: scrape, search, and interact fall back to the
+	// keyless free tier (rate-limited per IP). Other methods return 401 from the
+	// API until a key is provided.
 
 	// Resolve API URL.
 	apiURL := cfg.APIURL
@@ -94,6 +92,9 @@ func (c *Client) Scrape(ctx context.Context, url string, opts *ScrapeOptions) (*
 	body := map[string]interface{}{"url": url}
 	mergeOptions(body, opts)
 
+	if _, ok := body["origin"]; !ok {
+		body["origin"] = "go-sdk@" + Version
+	}
 	raw, err := c.http.post(ctx, "/v2/scrape", body, nil)
 	if err != nil {
 		return nil, err
@@ -131,6 +132,9 @@ func (c *Client) Interact(ctx context.Context, jobID, code string, params *Inter
 		}
 	}
 
+	if _, ok := body["origin"]; !ok {
+		body["origin"] = "go-sdk@" + Version
+	}
 	raw, err := c.http.post(ctx, "/v2/scrape/"+jobID+"/interact", body, nil)
 	if err != nil {
 		return nil, err
@@ -169,6 +173,9 @@ func (c *Client) StopInteractiveBrowser(ctx context.Context, jobID string) (*Bro
 func (c *Client) StartCrawl(ctx context.Context, url string, opts *CrawlOptions) (*CrawlResponse, error) {
 	if url == "" {
 		return nil, &FirecrawlError{Message: "URL is required"}
+	}
+	if opts != nil && opts.Limit != nil && *opts.Limit <= 0 {
+		return nil, &FirecrawlError{Message: "limit must be positive"}
 	}
 
 	body := map[string]interface{}{"url": url}
@@ -361,6 +368,9 @@ func (c *Client) Map(ctx context.Context, url string, opts *MapOptions) (*MapDat
 	if url == "" {
 		return nil, &FirecrawlError{Message: "URL is required"}
 	}
+	if opts != nil && opts.Limit != nil && *opts.Limit <= 0 {
+		return nil, &FirecrawlError{Message: "limit must be positive"}
+	}
 
 	body := map[string]interface{}{"url": url}
 	mergeOptions(body, opts)
@@ -378,6 +388,145 @@ func (c *Client) Map(ctx context.Context, url string, opts *MapOptions) (*MapDat
 }
 
 // ================================================================
+// MONITOR
+// ================================================================
+
+// CreateMonitor creates a scheduled monitor.
+func (c *Client) CreateMonitor(ctx context.Context, req *MonitorCreateRequest) (*Monitor, error) {
+	if req == nil {
+		return nil, &FirecrawlError{Message: "monitor request is required"}
+	}
+	raw, err := c.http.post(ctx, "/v2/monitor", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return extractDataAs[Monitor](raw)
+}
+
+// ListMonitors lists monitors for the authenticated team.
+func (c *Client) ListMonitors(ctx context.Context, opts *ListMonitorsOptions) ([]Monitor, error) {
+	path := "/v2/monitor" + listQuery(opts)
+	raw, err := c.http.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := extractDataAs[[]Monitor](raw)
+	if err != nil {
+		return nil, err
+	}
+	return *data, nil
+}
+
+// GetMonitor gets a monitor by ID.
+func (c *Client) GetMonitor(ctx context.Context, monitorID string) (*Monitor, error) {
+	if monitorID == "" {
+		return nil, &FirecrawlError{Message: "monitor ID is required"}
+	}
+	raw, err := c.http.get(ctx, "/v2/monitor/"+monitorID)
+	if err != nil {
+		return nil, err
+	}
+	return extractDataAs[Monitor](raw)
+}
+
+// UpdateMonitor updates a monitor.
+func (c *Client) UpdateMonitor(ctx context.Context, monitorID string, req *MonitorUpdateRequest) (*Monitor, error) {
+	if monitorID == "" {
+		return nil, &FirecrawlError{Message: "monitor ID is required"}
+	}
+	if req == nil {
+		return nil, &FirecrawlError{Message: "monitor update request is required"}
+	}
+	raw, err := c.http.patch(ctx, "/v2/monitor/"+monitorID, req)
+	if err != nil {
+		return nil, err
+	}
+	return extractDataAs[Monitor](raw)
+}
+
+// DeleteMonitor deletes a monitor.
+func (c *Client) DeleteMonitor(ctx context.Context, monitorID string) (bool, error) {
+	if monitorID == "" {
+		return false, &FirecrawlError{Message: "monitor ID is required"}
+	}
+	raw, err := c.http.delete(ctx, "/v2/monitor/"+monitorID)
+	if err != nil {
+		return false, err
+	}
+	var resp struct {
+		Success bool `json:"success"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false, &FirecrawlError{Message: fmt.Sprintf("failed to decode response: %v", err)}
+	}
+	return resp.Success, nil
+}
+
+// RunMonitor triggers a manual monitor check.
+func (c *Client) RunMonitor(ctx context.Context, monitorID string) (*MonitorCheck, error) {
+	if monitorID == "" {
+		return nil, &FirecrawlError{Message: "monitor ID is required"}
+	}
+	raw, err := c.http.post(ctx, "/v2/monitor/"+monitorID+"/run", map[string]interface{}{}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return extractDataAs[MonitorCheck](raw)
+}
+
+// ListMonitorChecks lists checks for a monitor.
+func (c *Client) ListMonitorChecks(ctx context.Context, monitorID string, opts *ListMonitorChecksOptions) ([]MonitorCheck, error) {
+	if monitorID == "" {
+		return nil, &FirecrawlError{Message: "monitor ID is required"}
+	}
+	path := "/v2/monitor/" + monitorID + "/checks" + checksQuery(opts)
+	raw, err := c.http.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := extractDataAs[[]MonitorCheck](raw)
+	if err != nil {
+		return nil, err
+	}
+	return *data, nil
+}
+
+// GetMonitorCheck gets a monitor check with page results, auto-paginated by default.
+func (c *Client) GetMonitorCheck(ctx context.Context, monitorID, checkID string, opts *GetMonitorCheckOptions) (*MonitorCheckDetail, error) {
+	if monitorID == "" || checkID == "" {
+		return nil, &FirecrawlError{Message: "monitor ID and check ID are required"}
+	}
+	path := "/v2/monitor/" + monitorID + "/checks/" + checkID + monitorCheckPageQuery(opts)
+	raw, err := c.http.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	detail, err := extractMonitorCheckDetail(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	autoPaginate := true
+	if opts != nil && opts.AutoPaginate != nil {
+		autoPaginate = *opts.AutoPaginate
+	}
+	for autoPaginate && detail.Next != "" {
+		raw, err := c.http.getAbsolute(ctx, detail.Next)
+		if err != nil {
+			return nil, err
+		}
+		nextPage, err := extractMonitorCheckDetail(raw)
+		if err != nil {
+			return nil, err
+		}
+		detail.Pages = append(detail.Pages, nextPage.Pages...)
+		detail.Next = nextPage.Next
+	}
+
+	return detail, nil
+}
+
+// ================================================================
 // SEARCH
 // ================================================================
 
@@ -386,10 +535,16 @@ func (c *Client) Search(ctx context.Context, query string, opts *SearchOptions) 
 	if query == "" {
 		return nil, &FirecrawlError{Message: "query is required"}
 	}
+	if opts != nil && opts.Limit != nil && *opts.Limit <= 0 {
+		return nil, &FirecrawlError{Message: "limit must be positive"}
+	}
 
 	body := map[string]interface{}{"query": query}
 	mergeOptions(body, opts)
 
+	if _, ok := body["origin"]; !ok {
+		body["origin"] = "go-sdk@" + Version
+	}
 	raw, err := c.http.post(ctx, "/v2/search", body, nil)
 	if err != nil {
 		return nil, err
@@ -400,6 +555,142 @@ func (c *Client) Search(ctx context.Context, query string, opts *SearchOptions) 
 		return nil, err
 	}
 	return data, nil
+}
+
+// SearchPapers searches research papers.
+func (c *Client) SearchPapers(ctx context.Context, query string, opts *SearchPapersOptions) (*SearchPapersResponse, error) {
+	if query == "" {
+		return nil, &FirecrawlError{Message: "query is required"}
+	}
+	values := url.Values{}
+	values.Set("query", query)
+	values.Set("origin", "go-sdk@"+Version)
+	if opts != nil {
+		if opts.K != nil {
+			values.Set("k", fmt.Sprint(*opts.K))
+		}
+		for _, author := range opts.Authors {
+			values.Add("authors", author)
+		}
+		for _, category := range opts.Categories {
+			values.Add("categories", category)
+		}
+		if opts.From != "" {
+			values.Set("from", opts.From)
+		}
+		if opts.To != "" {
+			values.Set("to", opts.To)
+		}
+	}
+
+	raw, err := c.http.get(ctx, "/v2/search/research/papers?"+values.Encode())
+	if err != nil {
+		return nil, err
+	}
+	var resp SearchPapersResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, &FirecrawlError{Message: fmt.Sprintf("failed to decode response: %v", err)}
+	}
+	return &resp, nil
+}
+
+// InspectPaper fetches paper metadata.
+func (c *Client) InspectPaper(ctx context.Context, paperID string) (*PaperMetadataResponse, error) {
+	if paperID == "" {
+		return nil, &FirecrawlError{Message: "paper ID is required"}
+	}
+	raw, err := c.http.get(ctx, "/v2/search/research/papers/"+url.PathEscape(paperID))
+	if err != nil {
+		return nil, err
+	}
+	var resp PaperMetadataResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, &FirecrawlError{Message: fmt.Sprintf("failed to decode response: %v", err)}
+	}
+	return &resp, nil
+}
+
+// ReadPaper fetches paper metadata and relevant passages.
+func (c *Client) ReadPaper(ctx context.Context, paperID, query string, opts *ReadPaperOptions) (*ReadPaperResponse, error) {
+	if paperID == "" {
+		return nil, &FirecrawlError{Message: "paper ID is required"}
+	}
+	if query == "" {
+		return nil, &FirecrawlError{Message: "query is required"}
+	}
+	values := url.Values{}
+	values.Set("query", query)
+	values.Set("origin", "go-sdk@"+Version)
+	if opts != nil && opts.K != nil {
+		values.Set("k", fmt.Sprint(*opts.K))
+	}
+	raw, err := c.http.get(ctx, "/v2/search/research/papers/"+url.PathEscape(paperID)+"?"+values.Encode())
+	if err != nil {
+		return nil, err
+	}
+	var resp ReadPaperResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, &FirecrawlError{Message: fmt.Sprintf("failed to decode response: %v", err)}
+	}
+	return &resp, nil
+}
+
+// RelatedPapers finds papers related to a paper.
+func (c *Client) RelatedPapers(ctx context.Context, paperID, intent string, opts *RelatedPapersOptions) (*SimilarPapersResponse, error) {
+	if paperID == "" {
+		return nil, &FirecrawlError{Message: "paper ID is required"}
+	}
+	if intent == "" {
+		return nil, &FirecrawlError{Message: "intent is required"}
+	}
+	values := url.Values{}
+	values.Set("intent", intent)
+	values.Set("origin", "go-sdk@"+Version)
+	if opts != nil {
+		if opts.Mode != "" {
+			values.Set("mode", opts.Mode)
+		}
+		if opts.K != nil {
+			values.Set("k", fmt.Sprint(*opts.K))
+		}
+		if opts.Rerank != nil {
+			values.Set("rerank", fmt.Sprint(*opts.Rerank))
+		}
+		for _, anchor := range opts.Anchor {
+			values.Add("anchor", anchor)
+		}
+	}
+	raw, err := c.http.get(ctx, "/v2/search/research/papers/"+url.PathEscape(paperID)+"/similar?"+values.Encode())
+	if err != nil {
+		return nil, err
+	}
+	var resp SimilarPapersResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, &FirecrawlError{Message: fmt.Sprintf("failed to decode response: %v", err)}
+	}
+	return &resp, nil
+}
+
+// SearchGitHub searches GitHub research content.
+func (c *Client) SearchGitHub(ctx context.Context, query string, opts *SearchGitHubOptions) (*GitHubSearchResponse, error) {
+	if query == "" {
+		return nil, &FirecrawlError{Message: "query is required"}
+	}
+	values := url.Values{}
+	values.Set("query", query)
+	values.Set("origin", "go-sdk@"+Version)
+	if opts != nil && opts.K != nil {
+		values.Set("k", fmt.Sprint(*opts.K))
+	}
+	raw, err := c.http.get(ctx, "/v2/search/research/github?"+values.Encode())
+	if err != nil {
+		return nil, err
+	}
+	var resp GitHubSearchResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, &FirecrawlError{Message: fmt.Sprintf("failed to decode response: %v", err)}
+	}
+	return &resp, nil
 }
 
 // ================================================================
@@ -784,6 +1075,63 @@ func mergeOptions(body map[string]interface{}, opts interface{}) {
 	}
 }
 
+func listQuery(opts *ListMonitorsOptions) string {
+	if opts == nil {
+		return ""
+	}
+	values := url.Values{}
+	if opts.Limit != nil {
+		values.Set("limit", fmt.Sprintf("%d", *opts.Limit))
+	}
+	if opts.Offset != nil {
+		values.Set("offset", fmt.Sprintf("%d", *opts.Offset))
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return "?" + encoded
+	}
+	return ""
+}
+
+func checksQuery(opts *ListMonitorChecksOptions) string {
+	if opts == nil {
+		return ""
+	}
+	values := url.Values{}
+	if opts.Limit != nil {
+		values.Set("limit", fmt.Sprintf("%d", *opts.Limit))
+	}
+	if opts.Offset != nil {
+		values.Set("offset", fmt.Sprintf("%d", *opts.Offset))
+	}
+	if opts.Status != "" {
+		values.Set("status", opts.Status)
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return "?" + encoded
+	}
+	return ""
+}
+
+func monitorCheckPageQuery(opts *GetMonitorCheckOptions) string {
+	if opts == nil {
+		return ""
+	}
+	values := url.Values{}
+	if opts.Limit != nil {
+		values.Set("limit", fmt.Sprintf("%d", *opts.Limit))
+	}
+	if opts.Skip != nil {
+		values.Set("skip", fmt.Sprintf("%d", *opts.Skip))
+	}
+	if opts.Status != "" {
+		values.Set("status", opts.Status)
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return "?" + encoded
+	}
+	return ""
+}
+
 // extractDataAs extracts the "data" field from a raw API response and deserializes it.
 func extractDataAs[T any](raw json.RawMessage) (*T, error) {
 	var envelope map[string]json.RawMessage
@@ -806,4 +1154,18 @@ func extractDataAs[T any](raw json.RawMessage) (*T, error) {
 		return nil, &FirecrawlError{Message: fmt.Sprintf("failed to decode data: %v", err)}
 	}
 	return &result, nil
+}
+
+func extractMonitorCheckDetail(raw json.RawMessage) (*MonitorCheckDetail, error) {
+	var envelope struct {
+		Data MonitorCheckDetail `json:"data"`
+		Next string             `json:"next"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, &FirecrawlError{Message: fmt.Sprintf("failed to decode response: %v", err)}
+	}
+	if envelope.Next != "" {
+		envelope.Data.Next = envelope.Next
+	}
+	return &envelope.Data, nil
 }

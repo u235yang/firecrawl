@@ -1,31 +1,37 @@
 /**
  * Unit test for audio-format engine routing via buildFallbackList.
- * Verifies that requesting audio format selects only index + tlsclient
- * engines (chrome-cdp and others are excluded) and that non-audio
- * requests still route through chrome-cdp as primary.
+ * Verifies that requesting audio format routes through chrome-cdp before
+ * audio postprocessing so browser cookies are available for avgrab.
  */
 
-// Avoid jest ESM-parse issues on transitive `uuid` import when pulling in engines.
-jest.mock("uuid", () => ({
-  v4: () => "test-uuid-v4",
-  v7: () => "test-uuid-v7",
-  validate: () => true,
-}));
-
 describe("Audio format engine routing (buildFallbackList)", () => {
-  let buildFallbackList: typeof import("../../../scraper/scrapeURL/engines").buildFallbackList;
+  let buildFallbackList: typeof import("../../../scraper/scrapeURL/engines/index.js").buildFallbackList;
+  let clearExchangeProvidersForTest: typeof import("../../../lib/exchange.js").clearExchangeProvidersForTest;
+  let setExchangeProvidersForTest: typeof import("../../../lib/exchange.js").setExchangeProvidersForTest;
 
   const originalFireEngineUrl = process.env.FIRE_ENGINE_BETA_URL;
-  const originalIndexUrl = process.env.INDEX_SUPABASE_URL;
+  const originalIndexUrl = process.env.INDEX_DATABASE_URL;
+  const originalExchangeUrl = process.env.FIRE_EXCHANGE_URL;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.FIRE_ENGINE_BETA_URL = "http://test-fire-engine";
-    process.env.INDEX_SUPABASE_URL = "http://test-index-supabase";
+    process.env.FIRE_EXCHANGE_URL = "http://test-exchange";
+    process.env.INDEX_DATABASE_URL =
+      "postgresql://postgres:postgres@localhost:5432/postgres";
 
-    jest.isolateModules(() => {
-      buildFallbackList =
-        require("../../../scraper/scrapeURL/engines").buildFallbackList;
-    });
+    // Re-import engines fresh so it reads the env vars set above at eval time.
+    vi.resetModules();
+    ({ buildFallbackList } = await import(
+      "../../../scraper/scrapeURL/engines/index.js"
+    ));
+    ({
+      clearExchangeProvidersForTest,
+      setExchangeProvidersForTest,
+    } = await import("../../../lib/exchange.js"));
+  });
+
+  afterEach(() => {
+    clearExchangeProvidersForTest();
   });
 
   afterAll(() => {
@@ -35,9 +41,14 @@ describe("Audio format engine routing (buildFallbackList)", () => {
       process.env.FIRE_ENGINE_BETA_URL = originalFireEngineUrl;
     }
     if (originalIndexUrl === undefined) {
-      delete process.env.INDEX_SUPABASE_URL;
+      delete process.env.INDEX_DATABASE_URL;
     } else {
-      process.env.INDEX_SUPABASE_URL = originalIndexUrl;
+      process.env.INDEX_DATABASE_URL = originalIndexUrl;
+    }
+    if (originalExchangeUrl === undefined) {
+      delete process.env.FIRE_EXCHANGE_URL;
+    } else {
+      process.env.FIRE_EXCHANGE_URL = originalExchangeUrl;
     }
   });
 
@@ -53,30 +64,58 @@ describe("Audio format engine routing (buildFallbackList)", () => {
       featureFlags: new Set(featureFlags),
       mock: null,
       logger: {
-        info: jest.fn(),
-        warn: jest.fn(),
-        debug: jest.fn(),
-        error: jest.fn(),
-        child: jest.fn().mockReturnThis(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+        child: vi.fn().mockReturnThis(),
       },
     }) as any;
 
-  it("routes audio format to index then tlsclient only", async () => {
+  it("routes audio format to chrome-cdp before tlsclient", async () => {
     const fallback = await buildFallbackList(buildStubMeta(["audio"]));
     const engines = fallback.map(f => f.engine);
 
-    // Cache-first (index, quality 1000), then tlsclient (quality 10).
-    // index;documents and tlsclient;stealth drop out via the positive-quality filter.
-    expect(engines).toEqual(["index", "fire-engine;tlsclient"]);
+    expect(engines).toEqual([
+      "fire-engine;chrome-cdp",
+      "fire-engine(retry);chrome-cdp",
+      "fire-engine;tlsclient",
+    ]);
   });
 
-  it("excludes chrome-cdp engines when audio format is requested", async () => {
+  it("excludes index and non-browser engines when audio format is requested", async () => {
     const fallback = await buildFallbackList(buildStubMeta(["audio"]));
     const engines = fallback.map(f => f.engine);
 
-    expect(engines).not.toContain("fire-engine;chrome-cdp");
+    expect(engines).toContain("fire-engine;chrome-cdp");
+    expect(engines).toContain("fire-engine(retry);chrome-cdp");
+    expect(engines).not.toContain("index");
+    expect(engines).not.toContain("index;documents");
     expect(engines).not.toContain("fire-engine;chrome-cdp;stealth");
-    expect(engines).not.toContain("fire-engine(retry);chrome-cdp");
+    expect(engines).not.toContain("fire-engine(retry);chrome-cdp;stealth");
+    expect(engines).not.toContain("fetch");
+  });
+
+  it("routes video format to chrome-cdp before tlsclient", async () => {
+    const fallback = await buildFallbackList(buildStubMeta(["video"]));
+    const engines = fallback.map(f => f.engine);
+
+    expect(engines).toEqual([
+      "fire-engine;chrome-cdp",
+      "fire-engine(retry);chrome-cdp",
+      "fire-engine;tlsclient",
+    ]);
+  });
+
+  it("excludes index and non-browser engines when video format is requested", async () => {
+    const fallback = await buildFallbackList(buildStubMeta(["video"]));
+    const engines = fallback.map(f => f.engine);
+
+    expect(engines).toContain("fire-engine;chrome-cdp");
+    expect(engines).toContain("fire-engine(retry);chrome-cdp");
+    expect(engines).not.toContain("index");
+    expect(engines).not.toContain("index;documents");
+    expect(engines).not.toContain("fire-engine;chrome-cdp;stealth");
     expect(engines).not.toContain("fire-engine(retry);chrome-cdp;stealth");
     expect(engines).not.toContain("fetch");
   });
@@ -86,5 +125,22 @@ describe("Audio format engine routing (buildFallbackList)", () => {
     const engines = fallback.map(f => f.engine);
 
     expect(engines).toContain("fire-engine;chrome-cdp");
+  });
+
+  it("does not route agent index-only requests through the Exchange", async () => {
+    setExchangeProvidersForTest([
+      { id: "acme", routes: [{ domains: ["profiles.example"] }] },
+    ]);
+
+    const meta = buildStubMeta([]);
+    meta.url = "https://profiles.example/person/example-person";
+    meta.options.formats = [{ type: "markdown" }];
+    meta.internalOptions.agentIndexOnly = true;
+    meta.internalOptions.teamFlags = { professionalProfileCompanyDataBeta: true };
+
+    const fallback = await buildFallbackList(meta);
+    const engines = fallback.map(f => f.engine);
+
+    expect(engines).toEqual(["index", "index;documents"]);
   });
 });

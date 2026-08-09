@@ -16,6 +16,9 @@ enum IntegrationEnum {
   RELEVANCEAI = "relevanceai",
   VIASOCKET = "viasocket",
   CLI = "cli",
+  HERMES = "hermes",
+  GSTACK = "gstack",
+  PROMETHEUS = "prometheus",
 }
 
 export const integrationSchema = z

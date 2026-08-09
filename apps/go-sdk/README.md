@@ -94,6 +94,52 @@ doc, err := client.Scrape(ctx, "https://example.com", &firecrawl.ScrapeOptions{
 })
 ```
 
+### Video Extraction
+
+Use the `video` format on supported video URLs, including YouTube and TikTok. The returned `Video` field is a signed URL to the extracted video file.
+
+```go
+doc, err := client.Scrape(ctx, "https://www.youtube.com/watch?v=dQw4w9WgXcQ", &firecrawl.ScrapeOptions{
+	Formats: []string{"video"},
+})
+if err != nil {
+	return err
+}
+fmt.Println(doc.Video)
+```
+
+### Product Extraction
+
+Use the `product` format on product pages for structured product extraction
+(title, price, availability, variants). The result is returned on the document's
+`Product` field. This is the deterministic counterpart to the LLM-based `json` format.
+
+```go
+doc, err := client.Scrape(ctx, "https://example.com/products/widget", &firecrawl.ScrapeOptions{
+	Formats: []string{"product"},
+})
+if err != nil {
+	return err
+}
+fmt.Println(doc.Product)
+```
+
+### Menu Extraction
+
+Use the `menu` format on menu pages for structured menu extraction
+(merchant, sections, items, prices, availability). The result is returned on the
+document's `Menu` field. This is the deterministic counterpart to the LLM-based `json` format.
+
+```go
+doc, err := client.Scrape(ctx, "https://example.com/menu", &firecrawl.ScrapeOptions{
+	Formats: []string{"menu"},
+})
+if err != nil {
+	return err
+}
+fmt.Println(doc.Menu)
+```
+
 #### Interactive Browser
 
 Execute code in a scrape-bound browser session:
@@ -112,8 +158,8 @@ deleteResp, err := client.StopInteractiveBrowser(ctx, scrapeJobID)
 
 Upload a local file (`html`, `pdf`, `docx`, etc.) via multipart form data and
 parse it synchronously. Parse options intentionally exclude browser-only
-features such as change tracking, screenshot, branding, actions, waitFor,
-location, and mobile. The `Proxy` option only accepts `"auto"` or `"basic"`.
+features such as change tracking, screenshot, branding, product, menu, audio, video, actions,
+waitFor, location, and mobile. The `Proxy` option only accepts `"auto"` or `"basic"`.
 
 ```go
 // From disk
@@ -341,10 +387,10 @@ The Go SDK lives in a monorepo subdirectory, so releases follow Go's
 **must** be prefixed with the module subdirectory path:
 
 ```
-apps/go-sdk/v1.0.0
+apps/go-sdk/v1.3.0
 ```
 
-A bare `v1.0.0` tag will not be resolvable by the Go module proxy.
+A bare `v1.3.0` tag will not be resolvable by the Go module proxy.
 
 ### Release workflow
 
@@ -352,7 +398,7 @@ The SDK version is the single source of truth in
 [`version.go`](./version.go):
 
 ```go
-const Version = "1.0.0"
+const Version = "1.3.0"
 ```
 
 To cut a release:
@@ -371,7 +417,7 @@ The workflow is idempotent: if the tag already exists, it is a no-op.
 ### Consuming a specific version
 
 ```bash
-go get github.com/firecrawl/firecrawl/apps/go-sdk@v1.1.0
+go get github.com/firecrawl/firecrawl/apps/go-sdk@v1.3.0
 ```
 
 Users pin via the semantic version suffix; they never reference the

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use super::client::Client;
 use super::scrape::ParserConfig;
 use super::types::{AttributeSelector, Document, JsonOptions};
-use crate::FirecrawlError;
+use crate::{AuditMetadata, FirecrawlError};
 
 /// Uploaded file payload for the `/v2/parse` endpoint.
 #[derive(Debug, Clone)]
@@ -129,6 +129,11 @@ pub struct ParseOptions {
     pub proxy: Option<ParseProxyType>,
     /// Integration identifier.
     pub integration: Option<String>,
+    /// Redact personally identifiable information from returned content.
+    #[serde(rename = "redactPII")]
+    pub redact_pii: Option<bool>,
+    /// User attribution to include with SIEM logging events.
+    pub audit_metadata: Option<AuditMetadata>,
     /// Request origin identifier.
     pub origin: Option<String>,
     /// Zero data retention mode.
