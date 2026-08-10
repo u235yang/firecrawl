@@ -179,6 +179,8 @@ bash /Users/nikcel/.agents/skills/firecrawl/scripts/health-check.sh
 
 期望返回 Firecrawl API 健康 JSON。脚本失败时，不能立即判断是京东云服务故障，应继续区分本机隧道和远端服务。
 
+该脚本只用于当前“Nginx 固定共享 Key”基线。LocalAuthProvider 切换后不能继续用公开根路由 `/` 证明用户 Key 有效，因为应用根路由本身不执行本地认证；届时必须改用方案中定义的 internal liveness/readiness 和经过 LocalAuthProvider 的 authenticated key probe，并同步更新本运行手册。
+
 ### 6.2 检查 LaunchAgent
 
 ```bash
@@ -265,10 +267,24 @@ firecrawl --api-url http://127.0.0.1:3002 \
 - 高可用、水平扩展和自动故障转移；
 - 公网 HTTPS 服务入口。
 
-如果下一阶段目标是“真正供多个独立用户使用”，应先确定身份与 Key 模型、配额策略、审计字段和验收用例，再选择 Nginx 多 Key、Firecrawl 原生认证或外部 API 网关方案。
+### 10.1 下一阶段已选技术路线
+
+根据 `authprovider` 分支所包含的最新 Firecrawl `v2.11.193` 源码审计，下一阶段不再在 Nginx 多 Key、直接开启托管数据库认证和外部 API Gateway 三者之间待选，而是采用以下路线：
+
+- 在 Firecrawl 内增加可插拔的 `LocalAuthProvider`，把本地 API Key 解析为原生 `user_id/team_id/org_id/api_key_id`；
+- 增加本地注册、会话、Key 创建/轮换/撤销和审计控制面；
+- 复用 Firecrawl 已有的 `team_id`、队列 owner、Controller 和 Worker 任务归属能力；
+- 同时增加本地策略、用量账本和资源准入层，强制团队/Key 速率、额度、并发和全局容量；
+- 将部署形态、认证提供者、任务持久化和团队限制从 `USE_DB_AUTHENTICATION` 中拆开；
+- Nginx 继续负责回环入口、Host/路径/方法白名单和反向代理，在切换时由固定共享 Key 校验改为把用户 Bearer Key 传给 Firecrawl；
+- 当前阶段不要求独立创建 Gateway 服务；只有未来出现多产品统一入口、跨集群路由或统一商业计费需求时再评估。
+
+源码已有团队级隔离骨架，但并非所有路由都已安全可用。v2 Extract 状态的 owner 检查、async Scrape 状态、本地配额 fail-closed、幂等键租户化等问题必须在开放相关路由前修复并通过 A/B 两租户测试。
+
+完整设计、开发工作包、迁移顺序和验收标准见[《京东云 Firecrawl 多用户注册与本地 AuthProvider 技术方案》](cloudflare-registration-api-key-design.md)。该方案目前仍是设计，不是已部署事实。
 
 ## 11. 当前结论
 
 京东云上已经建立一套可用的私有 Firecrawl 服务，并通过 Nginx Bearer API Key 完成入口鉴权。无 Key 和错误 Key 被拒绝，正确 Key 可以访问健康接口并执行真实抓取与搜索；Firecrawl 和全部内部依赖保持最小网络暴露。
 
-因此，“在京东云建立一个可以鉴权的 Firecrawl 服务”这一阶段目标已经实现并通过验证。完整多用户身份、权限、配额和租户隔离仍属于下一阶段。
+因此，“在京东云建立一个可以鉴权的 Firecrawl 服务”这一阶段目标已经实现并通过验证。完整多用户身份、权限、配额和租户隔离仍属于下一阶段；其技术路线已经确定为 Firecrawl 内嵌本地 AuthProvider 与本地配额/资源准入，不要求单独创建 Gateway，但尚未实施和验收。

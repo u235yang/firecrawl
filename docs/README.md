@@ -6,7 +6,7 @@
 
 ## 相关入口
 
-- [Cloudflare 公网注册与用户 API Key 技术方案](cloudflare-registration-api-key-design.md)
+- [京东云 Firecrawl 多用户注册与本地 AuthProvider 技术方案](cloudflare-registration-api-key-design.md)
 - [京东云 Firecrawl 鉴权服务：现状与解决方案](jingdong-firecrawl-auth-service.md)
 - [项目目标与 Agent 约束](../AGENTS.md)
 - [Firecrawl 上游项目说明](../README.md)
