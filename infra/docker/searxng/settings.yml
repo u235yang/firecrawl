@@ -29,8 +29,19 @@ engines:
     disabled: false
 
   - name: 360search
-    engine: 360search
+    # The desktop endpoint starts redirecting this server IP to qcaptcha after
+    # a few requests.  The mobile endpoint remains available and exposes each
+    # organic target in data-pcurl, so use the generic XPath engine here.
+    engine: xpath
     shortcut: 360so
+    categories:
+      - general
+    paging: false
+    search_url: https://m.so.com/s?q={query}
+    results_xpath: //div[contains(@class, "res-list") and @data-pcurl and .//h3[contains(@class, "res-title")]]
+    url_xpath: ./@data-pcurl
+    title_xpath: .//h3[contains(@class, "res-title")]
+    content_xpath: .//*[contains(@class, "summary")][1]
     timeout: 20.0
     disabled: false
 
