@@ -44,7 +44,19 @@ engines:
     disabled: false
 
   - name: bing
-    engine: bing
+    # The built-in Bing parser returns an empty result set after Bing redirects
+    # this mainland-China deployment to cn.bing.com.  Keep the engine name
+    # stable for Firecrawl, but parse the current China result page explicitly.
+    engine: xpath
     shortcut: bi
+    categories:
+      - general
+      - web
+    paging: false
+    search_url: https://cn.bing.com/search?q={query}
+    results_xpath: //ol[@id="b_results"]/li[contains(@class, "b_algo")]
+    url_xpath: .//h2/a/@href
+    title_xpath: .//h2/a
+    content_xpath: .//div[contains(@class, "b_caption")]/p
     timeout: 15.0
     disabled: false
