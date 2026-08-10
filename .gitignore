@@ -1,4 +1,5 @@
 .DS_Store
+/.firecrawl/
 /node_modules/
 /dist/
 .env

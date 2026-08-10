@@ -1,0 +1,34 @@
+services:
+  api:
+    environment:
+      SEARXNG_ENDPOINT: http://searxng:8080
+      SEARXNG_ENGINES: exa,360search,yandex,bing
+      SEARXNG_CATEGORIES: general
+    depends_on:
+      searxng:
+        condition: service_healthy
+
+  searxng:
+    image: docker.m.daocloud.io/searxng/searxng:latest@sha256:fa1b0523e5a66c374fc04f4471f7ab54a718f33f864e8409e0db0133041eab3a
+    restart: unless-stopped
+    environment:
+      EXA_API_KEY: ${EXA_API_KEY:?EXA_API_KEY must be set in the deployment environment}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET must be set in the deployment environment}
+      GRANIAN_WORKERS: "1"
+      GRANIAN_BLOCKING_THREADS: "2"
+    volumes:
+      - ./infra/docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./infra/docker/searxng/engines/exa.py:/usr/local/searxng/searx/engines/exa.py:ro
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    cpus: 0.5
+    mem_limit: 384M
+    memswap_limit: 512M
