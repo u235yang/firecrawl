@@ -9,7 +9,7 @@ services:
         condition: service_healthy
 
   searxng:
-    image: docker.m.daocloud.io/searxng/searxng:latest@sha256:fa1b0523e5a66c374fc04f4471f7ab54a718f33f864e8409e0db0133041eab3a
+    image: ghcr.io/searxng/searxng:2026.8.12-cdfdaa5a8@sha256:c2dc2d9e6b910653e8628361c23443222490e4cabbb9e02667b7847143db843b
     restart: unless-stopped
     environment:
       EXA_API_KEY: ${EXA_API_KEY:?EXA_API_KEY must be set in the deployment environment}
